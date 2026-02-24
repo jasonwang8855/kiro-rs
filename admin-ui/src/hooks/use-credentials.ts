@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+﻿import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   getCredentials,
   setCredentialDisabled,
@@ -9,29 +9,31 @@ import {
   deleteCredential,
   getLoadBalancingMode,
   setLoadBalancingMode,
+  listApiKeys,
+  createApiKey,
+  setApiKeyDisabled,
+  deleteApiKey,
+  getApiStats,
 } from '@/api/credentials'
-import type { AddCredentialRequest } from '@/types/api'
+import type { AddCredentialRequest, CreateApiKeyRequest } from '@/types/api'
 
-// 查询凭据列表
 export function useCredentials() {
   return useQuery({
     queryKey: ['credentials'],
     queryFn: getCredentials,
-    refetchInterval: 30000, // 每 30 秒刷新一次
+    refetchInterval: 30000,
   })
 }
 
-// 查询凭据余额
 export function useCredentialBalance(id: number | null) {
   return useQuery({
     queryKey: ['credential-balance', id],
     queryFn: () => getCredentialBalance(id!),
     enabled: id !== null,
-    retry: false, // 余额查询失败时不重试（避免重复请求被封禁的账号）
+    retry: false,
   })
 }
 
-// 设置禁用状态
 export function useSetDisabled() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -43,7 +45,6 @@ export function useSetDisabled() {
   })
 }
 
-// 设置优先级
 export function useSetPriority() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -55,7 +56,6 @@ export function useSetPriority() {
   })
 }
 
-// 重置失败计数
 export function useResetFailure() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -66,7 +66,6 @@ export function useResetFailure() {
   })
 }
 
-// 添加新凭据
 export function useAddCredential() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -77,7 +76,6 @@ export function useAddCredential() {
   })
 }
 
-// 删除凭据
 export function useDeleteCredential() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -88,7 +86,6 @@ export function useDeleteCredential() {
   })
 }
 
-// 获取负载均衡模式
 export function useLoadBalancingMode() {
   return useQuery({
     queryKey: ['loadBalancingMode'],
@@ -96,13 +93,61 @@ export function useLoadBalancingMode() {
   })
 }
 
-// 设置负载均衡模式
 export function useSetLoadBalancingMode() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: setLoadBalancingMode,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
+    },
+  })
+}
+
+export function useApiKeys() {
+  return useQuery({
+    queryKey: ['apiKeys'],
+    queryFn: listApiKeys,
+    refetchInterval: 30000,
+  })
+}
+
+export function useApiStats() {
+  return useQuery({
+    queryKey: ['apiStats'],
+    queryFn: getApiStats,
+    refetchInterval: 30000,
+  })
+}
+
+export function useCreateApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (req: CreateApiKeyRequest) => createApiKey(req),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+      queryClient.invalidateQueries({ queryKey: ['apiStats'] })
+    },
+  })
+}
+
+export function useSetApiKeyDisabled() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) => setApiKeyDisabled(id, disabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+      queryClient.invalidateQueries({ queryKey: ['apiStats'] })
+    },
+  })
+}
+
+export function useDeleteApiKey() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => deleteApiKey(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+      queryClient.invalidateQueries({ queryKey: ['apiStats'] })
     },
   })
 }

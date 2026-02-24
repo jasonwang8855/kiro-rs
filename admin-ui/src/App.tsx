@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+﻿import { useState, useEffect } from 'react'
 import { storage } from '@/lib/storage'
 import { LoginPage } from '@/components/login-page'
 import { Dashboard } from '@/components/dashboard'
@@ -8,8 +8,7 @@ function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
 
   useEffect(() => {
-    // 检查是否已经有保存的 API Key
-    if (storage.getApiKey()) {
+    if (storage.getToken()) {
       setIsLoggedIn(true)
     }
   }, [])

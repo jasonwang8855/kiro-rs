@@ -130,7 +130,16 @@ export function CredentialCard({
 
   return (
     <>
-      <Card className={credential.isCurrent ? 'ring-2 ring-primary' : ''}>
+      <Card
+        className={[
+          'border shadow-sm transition-all',
+          credential.isCurrent
+            ? 'ring-2 ring-sky-400 bg-gradient-to-br from-sky-50 via-blue-50 to-cyan-50'
+            : credential.disabled
+              ? 'bg-gradient-to-br from-slate-100 to-slate-200 border-slate-300'
+              : 'bg-gradient-to-br from-white to-slate-50 border-slate-200 hover:shadow-md',
+        ].join(' ')}
+      >
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -256,7 +265,7 @@ export function CredentialCard({
           </div>
 
           {/* 操作按钮 */}
-          <div className="flex flex-wrap gap-2 pt-2 border-t">
+          <div className="flex flex-wrap gap-2 pt-2 border-t border-slate-200/80">
             <Button
               size="sm"
               variant="outline"

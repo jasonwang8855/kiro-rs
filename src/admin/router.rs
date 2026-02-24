@@ -1,38 +1,20 @@
-//! Admin API 路由配置
-
 use axum::{
     Router, middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 
 use super::{
     handlers::{
-        add_credential, delete_credential, get_all_credentials, get_credential_balance,
-        get_load_balancing_mode, reset_failure_count, set_credential_disabled,
+        add_credential, create_api_key, delete_api_key, delete_credential, get_all_credentials,
+        get_api_stats, get_credential_balance, get_load_balancing_mode, list_api_keys, login,
+        reset_failure_count, set_api_key_disabled, set_credential_disabled,
         set_credential_priority, set_load_balancing_mode,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
 
-/// 创建 Admin API 路由
-///
-/// # 端点
-/// - `GET /credentials` - 获取所有凭据状态
-/// - `POST /credentials` - 添加新凭据
-/// - `DELETE /credentials/:id` - 删除凭据
-/// - `POST /credentials/:id/disabled` - 设置凭据禁用状态
-/// - `POST /credentials/:id/priority` - 设置凭据优先级
-/// - `POST /credentials/:id/reset` - 重置失败计数
-/// - `GET /credentials/:id/balance` - 获取凭据余额
-/// - `GET /config/load-balancing` - 获取负载均衡模式
-/// - `PUT /config/load-balancing` - 设置负载均衡模式
-///
-/// # 认证
-/// 需要 Admin API Key 认证，支持：
-/// - `x-api-key` header
-/// - `Authorization: Bearer <token>` header
 pub fn create_admin_router(state: AdminState) -> Router {
-    Router::new()
+    let protected = Router::new()
         .route(
             "/credentials",
             get(get_all_credentials).post(add_credential),
@@ -46,9 +28,17 @@ pub fn create_admin_router(state: AdminState) -> Router {
             "/config/load-balancing",
             get(get_load_balancing_mode).put(set_load_balancing_mode),
         )
+        .route("/apikeys", get(list_api_keys).post(create_api_key))
+        .route("/apikeys/{id}", delete(delete_api_key))
+        .route("/apikeys/{id}/disabled", post(set_api_key_disabled))
+        .route("/stats", get(get_api_stats))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
-        ))
+        ));
+
+    Router::new()
+        .route("/auth/login", post(login))
+        .merge(protected)
         .with_state(state)
 }

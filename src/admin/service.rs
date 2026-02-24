@@ -8,6 +8,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::apikeys::{ApiKeyManager, ApiKeyPublicInfo, ApiKeyUsageOverview};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 
@@ -34,12 +35,13 @@ struct CachedBalance {
 /// 封装所有 Admin API 的业务逻辑
 pub struct AdminService {
     token_manager: Arc<MultiTokenManager>,
+    api_keys: Arc<ApiKeyManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
 }
 
 impl AdminService {
-    pub fn new(token_manager: Arc<MultiTokenManager>) -> Self {
+    pub fn new(token_manager: Arc<MultiTokenManager>, api_keys: Arc<ApiKeyManager>) -> Self {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
@@ -48,6 +50,7 @@ impl AdminService {
 
         Self {
             token_manager,
+            api_keys,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
         }
@@ -246,6 +249,35 @@ impl AdminService {
         Ok(())
     }
 
+    pub fn list_api_keys(&self) -> Vec<ApiKeyPublicInfo> {
+        self.api_keys.list()
+    }
+
+    pub fn api_key_overview(&self) -> ApiKeyUsageOverview {
+        self.api_keys.overview()
+    }
+
+    pub fn create_api_key(&self, name: String) -> anyhow::Result<crate::apikeys::ApiKeyRecord> {
+        if name.trim().is_empty() {
+            anyhow::bail!("name 不能为空");
+        }
+        Ok(self.api_keys.create_key(name))
+    }
+
+    pub fn set_api_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
+        if self.api_keys.set_enabled(id, enabled) {
+            return Ok(());
+        }
+        anyhow::bail!("api key 不存在: {}", id)
+    }
+
+    pub fn delete_api_key(&self, id: &str) -> anyhow::Result<()> {
+        if self.api_keys.delete_key(id) {
+            return Ok(());
+        }
+        anyhow::bail!("api key 不存在: {}", id)
+    }
+
     /// 获取负载均衡模式
     pub fn get_load_balancing_mode(&self) -> LoadBalancingModeResponse {
         LoadBalancingModeResponse {
@@ -405,7 +437,8 @@ impl AdminService {
         let msg = e.to_string();
         if msg.contains("不存在") {
             AdminServiceError::NotFound { id }
-        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据") {
+        } else if msg.contains("只能删除已禁用的凭据") || msg.contains("请先禁用凭据")
+        {
             AdminServiceError::InvalidCredential(msg)
         } else {
             AdminServiceError::InternalError(msg)

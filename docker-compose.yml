@@ -1,14 +1,28 @@
-services:
+﻿services:
   kiro-rs:
-    # 使用国内镜像
-    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    image: ghcr.io/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: kiro-rs:local
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:8990:8990"
+      - "8990:8990"
     volumes:
       - ./config.json:/app/config/config.json
       - ./credentials.json:/app/config/credentials.json
     restart: unless-stopped
+
+  kiro-rs-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: tester
+    image: kiro-rs:test
+    container_name: kiro-rs-test
+    working_dir: /app
+    command: ["cargo", "test", "--all-targets", "--", "--nocapture"]
+    profiles:
+      - test

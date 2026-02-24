@@ -1,12 +1,10 @@
-// 凭据状态响应
-export interface CredentialsStatusResponse {
+﻿export interface CredentialsStatusResponse {
   total: number
   available: number
   currentId: number
   credentials: CredentialStatusItem[]
 }
 
-// 单个凭据状态
 export interface CredentialStatusItem {
   id: number
   priority: number
@@ -24,7 +22,6 @@ export interface CredentialStatusItem {
   proxyUrl?: string
 }
 
-// 余额响应
 export interface BalanceResponse {
   id: number
   subscriptionTitle: string | null
@@ -35,13 +32,11 @@ export interface BalanceResponse {
   nextResetAt: number | null
 }
 
-// 成功响应
 export interface SuccessResponse {
   success: boolean
   message: string
 }
 
-// 错误响应
 export interface AdminErrorResponse {
   error: {
     type: string
@@ -49,7 +44,6 @@ export interface AdminErrorResponse {
   }
 }
 
-// 请求类型
 export interface SetDisabledRequest {
   disabled: boolean
 }
@@ -58,7 +52,6 @@ export interface SetPriorityRequest {
   priority: number
 }
 
-// 添加凭据请求
 export interface AddCredentialRequest {
   refreshToken: string
   authMethod?: 'social' | 'idc'
@@ -73,10 +66,61 @@ export interface AddCredentialRequest {
   proxyPassword?: string
 }
 
-// 添加凭据响应
 export interface AddCredentialResponse {
   success: boolean
   message: string
   credentialId: number
   email?: string
+}
+
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface LoginResponse {
+  success: boolean
+  token: string
+  expiresAt: string
+}
+
+export interface ApiKeyItem {
+  id: string
+  name: string
+  key: string
+  enabled: boolean
+  createdAt: string
+  lastUsedAt: string | null
+  requestCount: number
+  inputTokens: number
+  outputTokens: number
+  keyPreview: string
+}
+
+export interface ApiKeyListResponse {
+  keys: ApiKeyItem[]
+}
+
+export interface CreateApiKeyRequest {
+  name: string
+}
+
+export interface CreateApiKeyResponse {
+  success: boolean
+  id: string
+  name: string
+  key: string
+  keyPreview: string
+}
+
+export interface ApiUsageOverview {
+  totalKeys: number
+  enabledKeys: number
+  totalRequests: number
+  totalInputTokens: number
+  totalOutputTokens: number
+}
+
+export interface ApiStatsResponse {
+  overview: ApiUsageOverview
 }

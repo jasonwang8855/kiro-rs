@@ -1,4 +1,4 @@
-import axios from 'axios'
+﻿import axios from 'axios'
 import { storage } from '@/lib/storage'
 import type {
   CredentialsStatusResponse,
@@ -8,9 +8,14 @@ import type {
   SetPriorityRequest,
   AddCredentialRequest,
   AddCredentialResponse,
+  LoginRequest,
+  LoginResponse,
+  ApiKeyListResponse,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
+  ApiStatsResponse,
 } from '@/types/api'
 
-// 创建 axios 实例
 const api = axios.create({
   baseURL: '/api/admin',
   headers: {
@@ -18,22 +23,24 @@ const api = axios.create({
   },
 })
 
-// 请求拦截器添加 API Key
 api.interceptors.request.use((config) => {
-  const apiKey = storage.getApiKey()
-  if (apiKey) {
-    config.headers['x-api-key'] = apiKey
+  const token = storage.getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
   }
   return config
 })
 
-// 获取所有凭据状态
+export async function login(req: LoginRequest): Promise<LoginResponse> {
+  const { data } = await api.post<LoginResponse>('/auth/login', req)
+  return data
+}
+
 export async function getCredentials(): Promise<CredentialsStatusResponse> {
   const { data } = await api.get<CredentialsStatusResponse>('/credentials')
   return data
 }
 
-// 设置凭据禁用状态
 export async function setCredentialDisabled(
   id: number,
   disabled: boolean
@@ -45,7 +52,6 @@ export async function setCredentialDisabled(
   return data
 }
 
-// 设置凭据优先级
 export async function setCredentialPriority(
   id: number,
   priority: number
@@ -57,7 +63,6 @@ export async function setCredentialPriority(
   return data
 }
 
-// 重置失败计数
 export async function resetCredentialFailure(
   id: number
 ): Promise<SuccessResponse> {
@@ -65,13 +70,11 @@ export async function resetCredentialFailure(
   return data
 }
 
-// 获取凭据余额
 export async function getCredentialBalance(id: number): Promise<BalanceResponse> {
   const { data } = await api.get<BalanceResponse>(`/credentials/${id}/balance`)
   return data
 }
 
-// 添加新凭据
 export async function addCredential(
   req: AddCredentialRequest
 ): Promise<AddCredentialResponse> {
@@ -79,20 +82,42 @@ export async function addCredential(
   return data
 }
 
-// 删除凭据
 export async function deleteCredential(id: number): Promise<SuccessResponse> {
   const { data } = await api.delete<SuccessResponse>(`/credentials/${id}`)
   return data
 }
 
-// 获取负载均衡模式
 export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.get<{ mode: 'priority' | 'balanced' }>('/config/load-balancing')
   return data
 }
 
-// 设置负载均衡模式
 export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
   const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+  return data
+}
+
+export async function listApiKeys(): Promise<ApiKeyListResponse> {
+  const { data } = await api.get<ApiKeyListResponse>('/apikeys')
+  return data
+}
+
+export async function createApiKey(req: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+  const { data } = await api.post<CreateApiKeyResponse>('/apikeys', req)
+  return data
+}
+
+export async function setApiKeyDisabled(id: string, disabled: boolean): Promise<SuccessResponse> {
+  const { data } = await api.post<SuccessResponse>(`/apikeys/${id}/disabled`, { disabled })
+  return data
+}
+
+export async function deleteApiKey(id: string): Promise<SuccessResponse> {
+  const { data } = await api.delete<SuccessResponse>(`/apikeys/${id}`)
+  return data
+}
+
+export async function getApiStats(): Promise<ApiStatsResponse> {
+  const { data } = await api.get<ApiStatsResponse>('/stats')
   return data
 }

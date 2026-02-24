@@ -1,58 +1,66 @@
-import { useState, useEffect } from 'react'
-import { KeyRound } from 'lucide-react'
+﻿import { useState } from 'react'
+import { ShieldCheck } from 'lucide-react'
 import { storage } from '@/lib/storage'
+import { login } from '@/api/credentials'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
+import { extractErrorMessage } from '@/lib/utils'
 
 interface LoginPageProps {
-  onLogin: (apiKey: string) => void
+  onLogin: () => void
 }
 
 export function LoginPage({ onLogin }: LoginPageProps) {
-  const [apiKey, setApiKey] = useState('')
+  const [username, setUsername] = useState('admin')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
 
-  useEffect(() => {
-    // 从 storage 读取保存的 API Key
-    const savedKey = storage.getApiKey()
-    if (savedKey) {
-      setApiKey(savedKey)
-    }
-  }, [])
-
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (apiKey.trim()) {
-      storage.setApiKey(apiKey.trim())
-      onLogin(apiKey.trim())
+    if (!username.trim() || !password.trim()) return
+
+    setLoading(true)
+    setError('')
+    try {
+      const result = await login({ username: username.trim(), password: password.trim() })
+      storage.setToken(result.token)
+      onLogin()
+    } catch (err) {
+      setError(extractErrorMessage(err))
+    } finally {
+      setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
-            <KeyRound className="h-6 w-6 text-primary" />
+    <div className="min-h-screen flex items-center justify-center bg-admin-grid p-4">
+      <Card className="w-full max-w-md border-0 shadow-2xl">
+        <CardHeader className="text-center space-y-3">
+          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 text-white shadow-lg">
+            <ShieldCheck className="h-7 w-7" />
           </div>
-          <CardTitle className="text-2xl">Kiro Admin</CardTitle>
-          <CardDescription>
-            请输入 Admin API Key 以访问管理面板
-          </CardDescription>
+          <CardTitle className="text-2xl tracking-tight">Kiro Admin</CardTitle>
+          <CardDescription>使用账号密码登录管理后台</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Input
-                type="password"
-                placeholder="Admin API Key"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                className="text-center"
-              />
-            </div>
-            <Button type="submit" className="w-full" disabled={!apiKey.trim()}>
-              登录
+            <Input
+              type="text"
+              placeholder="用户名"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <Input
+              type="password"
+              placeholder="密码"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            {error && <div className="text-sm text-red-500">{error}</div>}
+            <Button type="submit" className="w-full" disabled={loading || !username.trim() || !password.trim()}>
+              {loading ? '登录中...' : '登录'}
             </Button>
           </form>
         </CardContent>

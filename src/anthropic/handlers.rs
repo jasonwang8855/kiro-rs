@@ -2,15 +2,16 @@
 
 use std::convert::Infallible;
 
-use anyhow::Error;
+use crate::apikeys::AuthenticatedApiKey;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::token;
+use anyhow::Error;
 use axum::{
     Json as JsonExtractor,
     body::Body,
-    extract::State,
+    extract::{Extension, State},
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
@@ -24,7 +25,10 @@ use uuid::Uuid;
 use super::converter::{ConversionError, convert_request};
 use super::middleware::AppState;
 use super::stream::{BufferedStreamContext, SseEvent, StreamContext};
-use super::types::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse, OutputConfig, Thinking};
+use super::types::{
+    CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, Model, ModelsResponse,
+    OutputConfig, Thinking,
+};
 use super::websearch;
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
@@ -177,6 +181,7 @@ pub async fn get_models() -> impl IntoResponse {
 /// 创建消息（对话）
 pub async fn post_messages(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedApiKey>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -281,6 +286,9 @@ pub async fn post_messages(
 
     if payload.stream {
         // 流式响应
+        state
+            .api_keys
+            .record_usage(&auth.key_id, input_tokens.max(0) as u64, 0);
         handle_stream_request(
             provider,
             &request_body,
@@ -291,7 +299,15 @@ pub async fn post_messages(
         .await
     } else {
         // 非流式响应
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens).await
+        handle_non_stream_request(
+            provider,
+            state.api_keys.clone(),
+            &auth.key_id,
+            &request_body,
+            &payload.model,
+            input_tokens,
+        )
+        .await
     }
 }
 
@@ -434,6 +450,8 @@ const CONTEXT_WINDOW_SIZE: i32 = 200_000;
 /// 处理非流式请求
 async fn handle_non_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    auth_key_id: &str,
     request_body: &str,
     model: &str,
     input_tokens: i32,
@@ -499,14 +517,14 @@ async fn handle_non_stream_request(
                                 let input: serde_json::Value = if buffer.is_empty() {
                                     serde_json::json!({})
                                 } else {
-                                    serde_json::from_str(buffer)
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!(
-                                                "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                                e, tool_use.tool_use_id
-                                            );
-                                            serde_json::json!({})
-                                        })
+                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                            e,
+                                            tool_use.tool_use_id
+                                        );
+                                        serde_json::json!({})
+                                    })
                                 };
 
                                 tool_uses.push(json!({
@@ -572,6 +590,11 @@ async fn handle_non_stream_request(
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    api_keys.record_usage(
+        auth_key_id,
+        final_input_tokens.max(0) as u64,
+        output_tokens.max(0) as u64,
+    );
 
     // 构建 Anthropic 响应
     let response_body = json!({
@@ -602,14 +625,10 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_4_6 =
-        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_opus_4_6 = model_lower.contains("opus")
+        && (model_lower.contains("4-6") || model_lower.contains("4.6"));
 
-    let thinking_type = if is_opus_4_6 {
-        "adaptive"
-    } else {
-        "enabled"
-    };
+    let thinking_type = if is_opus_4_6 { "adaptive" } else { "enabled" };
 
     tracing::info!(
         model = %payload.model,
@@ -621,7 +640,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         thinking_type: thinking_type.to_string(),
         budget_tokens: 20000,
     });
-    
+
     if is_opus_4_6 {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
@@ -660,6 +679,7 @@ pub async fn count_tokens(
 /// - message_start 中的 input_tokens 是从 contextUsageEvent 计算的准确值
 pub async fn post_messages_cc(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthenticatedApiKey>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -765,6 +785,9 @@ pub async fn post_messages_cc(
 
     if payload.stream {
         // 流式响应（缓冲模式）
+        state
+            .api_keys
+            .record_usage(&auth.key_id, input_tokens.max(0) as u64, 0);
         handle_stream_request_buffered(
             provider,
             &request_body,
@@ -775,7 +798,15 @@ pub async fn post_messages_cc(
         .await
     } else {
         // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens).await
+        handle_non_stream_request(
+            provider,
+            state.api_keys.clone(),
+            &auth.key_id,
+            &request_body,
+            &payload.model,
+            input_tokens,
+        )
+        .await
     }
 }
 

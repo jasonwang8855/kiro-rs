@@ -1,54 +1,16 @@
-# Rust build artifacts
-target/
-Cargo.lock
-
-# Node.js dependencies and build artifacts
-admin-ui/node_modules/
-admin-ui/dist/
-admin-ui/pnpm-lock.yaml
-admin-ui/tsconfig.tsbuildinfo
-admin-ui/.vite/
-
-# Version control
+﻿target/
 .git/
 .gitignore
 
-# IDE and editor files
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+admin-ui/node_modules/
+admin-ui/dist/
+admin-ui/.vite/
+admin-ui/tsconfig.tsbuildinfo
 
-# Claude/AI
-.claude/
-CLAUDE.md
-AGENTS.md
-
-# CI/CD
-.github/
-
-# Documentation and examples
-*.md
-README.md
-config.example.json
-credentials.example.*.json
-
-# Development and test files
-src/test.rs
-src/debug.rs
-test.json
-tools/
-
-# OS-specific files
-.DS_Store
-Thumbs.db
-
-# Local configuration (keep templates only)
 config.json
 credentials.json
 
-# Docker files
-Dockerfile
-.dockerignore
-docker-compose*.yml
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
