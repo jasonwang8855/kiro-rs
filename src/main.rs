@@ -132,7 +132,8 @@ async fn main() {
 
         anthropic_app
             .nest("/api/admin", admin_app)
-            .nest("/admin", admin_ui_app)
+            .nest("/admin", admin_ui_app.clone())
+            .fallback_service(admin_ui_app)
             .nest("/v0/oauth/kiro", oauth_web_app)
     } else {
         anthropic_app
