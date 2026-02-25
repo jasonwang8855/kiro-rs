@@ -217,3 +217,20 @@ pub async fn get_request_logs(
     let entries = state.service.get_request_logs(query.since_id.as_deref());
     Json(RequestLogResponse { entries })
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SetLogEnabledRequest {
+    pub enabled: bool,
+}
+
+pub async fn set_log_enabled(
+    State(state): State<AdminState>,
+    Json(payload): Json<SetLogEnabledRequest>,
+) -> impl IntoResponse {
+    state.service.set_log_enabled(payload.enabled);
+    Json(SuccessResponse::new(if payload.enabled { "日志已开启" } else { "日志已关闭" }))
+}
+
+pub async fn get_log_enabled(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(serde_json::json!({ "enabled": state.service.is_log_enabled() }))
+}

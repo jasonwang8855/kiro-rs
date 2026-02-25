@@ -52,7 +52,6 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [batchValidating, setBatchValidating] = useState(false)
-  const [logMonitorEnabled, setLogMonitorEnabled] = useState(false)
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
@@ -419,7 +418,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </div>
         </section>
 
-        <RequestLogPanel enabled={logMonitorEnabled} onToggle={setLogMonitorEnabled} />
+        <RequestLogPanel />
       </main>
 
       <BalanceDialog

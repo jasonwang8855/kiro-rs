@@ -144,3 +144,12 @@ export async function getRequestLogs(sinceId?: string): Promise<RequestLogRespon
   const { data } = await api.get<RequestLogResponse>('/logs', { params })
   return data
 }
+
+export async function getLogEnabled(): Promise<{ enabled: boolean }> {
+  const { data } = await api.get<{ enabled: boolean }>('/logs/enabled')
+  return data
+}
+
+export async function setLogEnabled(enabled: boolean): Promise<void> {
+  await api.post('/logs/enabled', { enabled })
+}

@@ -334,6 +334,18 @@ impl AdminService {
         }
     }
 
+    /// 设置请求日志开关
+    pub fn set_log_enabled(&self, enabled: bool) {
+        if let Some(log) = &self.request_log {
+            log.set_enabled(enabled);
+        }
+    }
+
+    /// 获取请求日志开关状态
+    pub fn is_log_enabled(&self) -> bool {
+        self.request_log.as_ref().is_some_and(|l| l.is_enabled())
+    }
+
     /// 获取负载均衡模式
     pub fn get_load_balancing_mode(&self) -> LoadBalancingModeResponse {
         LoadBalancingModeResponse {

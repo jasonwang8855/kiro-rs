@@ -273,7 +273,7 @@ pub async fn post_messages(
 
     let message_count = payload.messages.len();
     let start = Instant::now();
-    let log_request_body = if state.request_log.is_some() {
+    let log_request_body = if state.request_log.as_ref().is_some_and(|l| l.is_enabled()) {
         serde_json::to_string(&payload).unwrap_or_default()
     } else {
         String::new()
@@ -881,7 +881,7 @@ pub async fn post_messages_cc(
 
     let message_count = payload.messages.len();
     let start = Instant::now();
-    let log_request_body = if state.request_log.is_some() {
+    let log_request_body = if state.request_log.as_ref().is_some_and(|l| l.is_enabled()) {
         serde_json::to_string(&payload).unwrap_or_default()
     } else {
         String::new()

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -25,21 +26,41 @@ pub struct RequestLogEntry {
 
 pub struct RequestLog {
     entries: Mutex<VecDeque<RequestLogEntry>>,
+    enabled: AtomicBool,
 }
 
 impl RequestLog {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(MAX_LOG_ENTRIES)),
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            self.entries.lock().clear();
         }
     }
 
     pub fn push(&self, entry: RequestLogEntry) {
+        if !self.is_enabled() {
+            return;
+        }
         let mut entries = self.entries.lock();
         if entries.len() >= MAX_LOG_ENTRIES {
             entries.pop_front();
         }
         entries.push_back(entry);
+    }
+
+    pub fn clear(&self) {
+        self.entries.lock().clear();
     }
 
     pub fn entries_since(&self, since_id: Option<&str>) -> Vec<RequestLogEntry> {

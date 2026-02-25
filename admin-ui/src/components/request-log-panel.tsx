@@ -3,19 +3,20 @@ import { ChevronDown, ChevronRight, ScrollText, Trash2 } from 'lucide-react'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { getRequestLogs } from '@/api/credentials'
+import { getRequestLogs, getLogEnabled, setLogEnabled } from '@/api/credentials'
 import type { RequestLogEntry } from '@/types/api'
 
-interface RequestLogPanelProps {
-  enabled: boolean
-  onToggle: (enabled: boolean) => void
-}
-
-export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
+export function RequestLogPanel() {
+  const [enabled, setEnabled] = useState(false)
   const [entries, setEntries] = useState<RequestLogEntry[]>([])
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const lastSeenIdRef = useRef<string | undefined>(undefined)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // 启动时从后端获取开关状态
+  useEffect(() => {
+    getLogEnabled().then((res) => setEnabled(res.enabled)).catch(() => {})
+  }, [])
 
   const poll = useCallback(async () => {
     try {
@@ -48,9 +49,24 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
     }
   }, [enabled, poll])
 
+  const handleToggle = async (value: boolean) => {
+    setEnabled(value)
+    if (!value) {
+      setEntries([])
+      setExpandedIds(new Set())
+      lastSeenIdRef.current = undefined
+    }
+    try {
+      await setLogEnabled(value)
+    } catch {
+      setEnabled(!value) // rollback on failure
+    }
+  }
+
   const handleClear = () => {
     setEntries([])
     setExpandedIds(new Set())
+    lastSeenIdRef.current = undefined
   }
 
   const toggleExpand = (id: string) => {
@@ -96,7 +112,7 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
           <span className="text-xs font-mono text-neutral-500">
             {enabled ? `${entries.length} 条` : '已关闭'}
           </span>
-          <Switch checked={enabled} onCheckedChange={onToggle} />
+          <Switch checked={enabled} onCheckedChange={handleToggle} />
         </div>
       </div>
       {enabled && (
@@ -181,3 +197,6 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
     </section>
   )
 }
+
+
+

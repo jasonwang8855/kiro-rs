@@ -7,9 +7,10 @@ use super::{
     handlers::{
         add_credential, create_api_key, delete_api_key, delete_credential, export_credential,
         export_credentials, get_all_credentials, get_api_stats, get_credential_balance,
-        get_load_balancing_mode, get_request_logs, get_total_balance, list_api_keys, login,
-        reset_failure_count, set_api_key_disabled, set_credential_disabled,
-        set_credential_priority, set_load_balancing_mode,
+        get_load_balancing_mode, get_log_enabled, get_request_logs, get_total_balance,
+        list_api_keys, login, reset_failure_count, set_api_key_disabled,
+        set_credential_disabled, set_credential_priority, set_load_balancing_mode,
+        set_log_enabled,
     },
     middleware::{AdminState, admin_auth_middleware},
 };
@@ -37,6 +38,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/apikeys/{id}/disabled", post(set_api_key_disabled))
         .route("/stats", get(get_api_stats))
         .route("/logs", get(get_request_logs))
+        .route("/logs/enabled", get(get_log_enabled).post(set_log_enabled))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,
