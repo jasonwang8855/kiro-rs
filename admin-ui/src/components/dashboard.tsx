@@ -1,5 +1,5 @@
-﻿import { useMemo, useState } from 'react'
-import { LogOut, Plus, RefreshCw, Copy, ShieldCheck } from 'lucide-react'
+﻿import { useEffect, useMemo, useState } from 'react'
+import { LogOut, Plus, RefreshCw, Copy, ShieldCheck, Download, HeartPulse } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -29,9 +29,12 @@ import {
   useCredentials,
   useDeleteApiKey,
   useSetApiKeyDisabled,
+  useTotalBalance,
 } from '@/hooks/use-credentials'
 import { useScrambleText } from '@/hooks/use-scramble-text'
-import { extractErrorMessage } from '@/lib/utils'
+import { extractErrorMessage, copyToClipboard } from '@/lib/utils'
+import { exportCredentials, getCredentialBalance } from '@/api/credentials'
+import type { BalanceResponse } from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
@@ -46,17 +49,35 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [oauthDialogOpen, setOauthDialogOpen] = useState(false)
   const [newApiKeyName, setNewApiKeyName] = useState('')
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [batchValidating, setBatchValidating] = useState(false)
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
   const { data: apiKeysData } = useApiKeys()
   const { data: apiStatsData } = useApiStats()
+  const { data: totalBalanceData } = useTotalBalance()
   const { mutate: createApiKey, isPending: creatingApiKey } = useCreateApiKey()
   const { mutate: setApiKeyDisabled } = useSetApiKeyDisabled()
   const { mutate: deleteApiKey } = useDeleteApiKey()
   const totalCredentialsDisplay = useScrambleText(String(data?.total || 0), !isLoading)
   const activeCredentialsDisplay = useScrambleText(String(data?.available || 0), !isLoading)
   const apiRequestsDisplay = useScrambleText(String(apiStatsData?.overview.totalRequests ?? 0), !isLoading)
+
+  const [balances, setBalances] = useState<Record<number, BalanceResponse>>({})
+  const [loadingBalances, setLoadingBalances] = useState<Record<number, boolean>>({})
+
+  useEffect(() => {
+    if (!data?.credentials?.length) return
+    for (const cred of data.credentials) {
+      if (balances[cred.id] || loadingBalances[cred.id]) continue
+      setLoadingBalances((prev) => ({ ...prev, [cred.id]: true }))
+      getCredentialBalance(cred.id)
+        .then((b) => setBalances((prev) => ({ ...prev, [cred.id]: b })))
+        .catch(() => {})
+        .finally(() => setLoadingBalances((prev) => ({ ...prev, [cred.id]: false })))
+    }
+  }, [data?.credentials])
 
   const sortedApiKeys = useMemo(
     () => [...(apiKeysData?.keys || [])].sort((a, b) => Number(b.enabled) - Number(a.enabled)),
@@ -97,11 +118,64 @@ export function Dashboard({ onLogout }: DashboardProps) {
 
   const handleCopy = async (value: string, label = '内容') => {
     try {
-      await navigator.clipboard.writeText(value)
+      await copyToClipboard(value)
       toast.success(`${label}已复制`)
     } catch {
       toast.error(`复制${label}失败`)
     }
+  }
+
+  const handleExport = async () => {
+    try {
+      const credentials = await exportCredentials()
+      const json = JSON.stringify(credentials, null, 2)
+      const blob = new Blob([json], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `credentials-export-${Date.now()}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('凭据导出成功')
+    } catch (err) {
+      toast.error(`导出失败: ${extractErrorMessage(err)}`)
+    }
+  }
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (!data?.credentials?.length) return
+    if (selectedIds.size === data.credentials.length) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(data.credentials.map((c) => c.id)))
+    }
+  }
+
+  const handleBatchValidate = async () => {
+    if (selectedIds.size === 0) return
+    setBatchValidating(true)
+    let ok = 0
+    let fail = 0
+    for (const id of selectedIds) {
+      try {
+        const b = await getCredentialBalance(id)
+        setBalances((prev) => ({ ...prev, [id]: b }))
+        ok++
+      } catch {
+        fail++
+      }
+    }
+    setBatchValidating(false)
+    toast.success(`验活完成：${ok} 成功${fail > 0 ? `，${fail} 失败` : ''}`)
   }
 
 
@@ -156,6 +230,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
               <Plus className="mr-2 h-4 w-4" />
               添加凭据
             </Button>
+            <Button onClick={handleExport} size="sm" variant="secondary">
+              <Download className="mr-2 h-4 w-4" />
+              导出
+            </Button>
             <Button variant="secondary" size="icon" onClick={() => refetch()}>
               <RefreshCw className="h-4 w-4" />
             </Button>
@@ -165,7 +243,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </div>
         </section>
 
-        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+        <Card className="col-span-1 md:col-span-3 border-white/10 bg-[#050505]">
           <CardHeader className="pb-3">
             <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">总凭据数</CardTitle>
           </CardHeader>
@@ -174,7 +252,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </CardContent>
         </Card>
 
-        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+        <Card className="col-span-1 md:col-span-3 border-white/10 bg-[#050505]">
           <CardHeader className="pb-3">
             <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">活跃凭据</CardTitle>
           </CardHeader>
@@ -184,7 +262,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </CardContent>
         </Card>
 
-        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+        <Card className="col-span-1 md:col-span-3 border-white/10 bg-[#050505]">
           <CardHeader className="pb-3">
             <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">API 请求量</CardTitle>
           </CardHeader>
@@ -196,8 +274,40 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </CardContent>
         </Card>
 
+        <Card className="col-span-1 md:col-span-3 border-white/10 bg-[#050505]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">总额度</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="text-5xl font-mono font-light tracking-tight text-white">
+              {totalBalanceData ? totalBalanceData.totalRemaining.toFixed(1) : '-'}
+            </div>
+            <div className="text-xs font-mono tracking-widest text-neutral-500 uppercase">
+              已用 <span className="text-white">{totalBalanceData?.totalCurrentUsage.toFixed(1) ?? '-'}</span> <span className="text-neutral-700">/</span> 总计 <span className="text-white">{totalBalanceData?.totalUsageLimit.toFixed(1) ?? '-'}</span>
+            </div>
+          </CardContent>
+        </Card>
+
         <section className="col-span-1 md:col-span-12 mt-4">
-          <h2 className="mb-4 px-1 font-sans text-sm font-medium tracking-wide text-neutral-500">凭据列表</h2>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-2 px-1">
+            <h2 className="font-sans text-sm font-medium tracking-wide text-neutral-500">凭据列表</h2>
+            {data?.credentials && data.credentials.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" variant="secondary" onClick={toggleSelectAll}>
+                  {selectedIds.size === data.credentials.length ? '取消全选' : '全选'}
+                </Button>
+                {selectedIds.size > 0 && (
+                  <>
+                    <span className="text-xs font-mono text-neutral-500">已选 {selectedIds.size}</span>
+                    <Button size="sm" variant="secondary" onClick={handleBatchValidate} disabled={batchValidating}>
+                      <HeartPulse className="mr-1 h-4 w-4" />
+                      {batchValidating ? '验活中...' : '批量验活'}
+                    </Button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <div>
             {data?.credentials.length === 0 ? (
               <div className="ghost-credentials relative grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -216,10 +326,10 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     key={credential.id}
                     credential={credential}
                     onViewBalance={handleViewBalance}
-                    selected={false}
-                    onToggleSelect={() => {}}
-                    balance={null}
-                    loadingBalance={false}
+                    selected={selectedIds.has(credential.id)}
+                    onToggleSelect={() => toggleSelect(credential.id)}
+                    balance={balances[credential.id] ?? null}
+                    loadingBalance={loadingBalances[credential.id] ?? false}
                   />
                 ))}
               </div>

@@ -1065,7 +1065,14 @@ impl StreamContext {
     }
 
     pub fn final_usage(&self) -> (i32, i32) {
-        let input = self.context_input_tokens.unwrap_or(self.input_tokens);
+        let (source, input) = match self.context_input_tokens {
+            Some(v) => ("upstream(contextUsageEvent)", v),
+            None => ("local(estimate)", self.input_tokens),
+        };
+        tracing::info!(
+            "token 统计 [{}]: input={}, output={}",
+            source, input, self.output_tokens
+        );
         (input, self.output_tokens)
     }
 }
@@ -1163,10 +1170,14 @@ impl BufferedStreamContext {
     }
 
     pub fn final_usage(&self) -> (i32, i32) {
-        let input = self
-            .inner
-            .context_input_tokens
-            .unwrap_or(self.estimated_input_tokens);
+        let (source, input) = match self.inner.context_input_tokens {
+            Some(v) => ("upstream(contextUsageEvent)", v),
+            None => ("local(estimate)", self.estimated_input_tokens),
+        };
+        tracing::info!(
+            "token 统计 [{}]: input={}, output={}",
+            source, input, self.inner.output_tokens
+        );
         (input, self.inner.output_tokens)
     }
 }

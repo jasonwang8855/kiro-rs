@@ -87,6 +87,15 @@ pub struct BalanceResponse {
     pub next_reset_at: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotalBalanceResponse {
+    pub total_usage_limit: f64,
+    pub total_current_usage: f64,
+    pub total_remaining: f64,
+    pub credential_count: usize,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadBalancingModeResponse {

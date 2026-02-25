@@ -185,3 +185,21 @@ pub async fn get_api_stats(State(state): State<AdminState>) -> impl IntoResponse
         overview: state.service.api_key_overview(),
     })
 }
+
+pub async fn export_credentials(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.export_credentials())
+}
+
+pub async fn export_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    match state.service.export_credential(id) {
+        Ok(cred) => Json(cred).into_response(),
+        Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+pub async fn get_total_balance(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_total_balance().await)
+}

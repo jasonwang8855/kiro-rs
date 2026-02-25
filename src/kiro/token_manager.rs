@@ -1283,6 +1283,38 @@ impl MultiTokenManager {
         }
     }
 
+    /// 导出所有凭据（用于备份/迁移）
+    ///
+    /// 返回与 credentials.json 兼容的凭据列表，清除临时字段（access_token、expires_at）
+    pub fn export_credentials(&self) -> Vec<KiroCredentials> {
+        let entries = self.entries.lock();
+        entries
+            .iter()
+            .map(|e| {
+                let mut cred = e.credentials.clone();
+                // 清除临时字段，导入后会自动刷新
+                cred.id = None;
+                cred.access_token = None;
+                cred.expires_at = None;
+                cred
+            })
+            .collect()
+    }
+
+    /// 导出单个凭据（用于备份/迁移）
+    pub fn export_credential(&self, id: u64) -> anyhow::Result<KiroCredentials> {
+        let entries = self.entries.lock();
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?;
+        let mut cred = entry.credentials.clone();
+        cred.id = None;
+        cred.access_token = None;
+        cred.expires_at = None;
+        Ok(cred)
+    }
+
     /// 设置凭据禁用状态（Admin API）
     pub fn set_disabled(&self, id: u64, disabled: bool) -> anyhow::Result<()> {
         {

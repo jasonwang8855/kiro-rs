@@ -59,7 +59,7 @@ async fn main() {
 
     let api_key_store = Path::new(&config_path)
         .parent()
-        .map(|p| p.join("api_keys.json"));
+        .map(|p| p.join("api_keys.db"));
     let api_keys = Arc::new(apikeys::ApiKeyManager::new(api_key.clone(), api_key_store));
 
     let proxy_config = config.proxy_url.as_ref().map(|url| {

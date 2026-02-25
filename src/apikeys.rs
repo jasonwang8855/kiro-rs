@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use chrono::Utc;
 use parking_lot::Mutex;
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -53,105 +54,172 @@ pub struct AuthenticatedApiKey {
 }
 
 pub struct ApiKeyManager {
-    keys: Mutex<Vec<ApiKeyRecord>>,
-    store_path: Option<PathBuf>,
+    conn: Mutex<Connection>,
 }
 
 impl ApiKeyManager {
     pub fn new(initial_key: String, store_path: Option<PathBuf>) -> Self {
-        let mut keys = Self::load_from(&store_path).unwrap_or_default();
+        let conn = match &store_path {
+            Some(p) => {
+                if let Some(parent) = p.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                Connection::open(p).expect("无法打开 SQLite 数据库")
+            }
+            None => Connection::open_in_memory().expect("无法创建内存数据库"),
+        };
 
-        if keys.is_empty() {
-            keys.push(ApiKeyRecord {
-                id: Uuid::new_v4().to_string(),
-                name: "Default".to_string(),
-                key: initial_key,
-                enabled: true,
-                created_at: Utc::now().to_rfc3339(),
-                last_used_at: None,
-                request_count: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-            });
-        } else if !initial_key.trim().is_empty()
-            && !keys
-                .iter()
-                .any(|k| auth::constant_time_eq(k.key.as_str(), initial_key.as_str()))
-        {
-            keys.push(ApiKeyRecord {
-                id: Uuid::new_v4().to_string(),
-                name: "Config API Key".to_string(),
-                key: initial_key,
-                enabled: true,
-                created_at: Utc::now().to_rfc3339(),
-                last_used_at: None,
-                request_count: 0,
-                input_tokens: 0,
-                output_tokens: 0,
-            });
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
+            .expect("设置 PRAGMA 失败");
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )
+        .expect("建表失败");
+
+        // 自动迁移旧 JSON 文件
+        if let Some(db_path) = &store_path {
+            let json_path = db_path.with_extension("json");
+            if json_path.exists() {
+                if let Ok(content) = fs::read_to_string(&json_path) {
+                    if let Ok(records) = serde_json::from_str::<Vec<ApiKeyRecord>>(&content) {
+                        for r in &records {
+                            let _ = conn.execute(
+                                "INSERT OR IGNORE INTO api_keys (id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                                params![r.id, r.name, r.key, r.enabled as i32, r.created_at, r.last_used_at, r.request_count as i64, r.input_tokens as i64, r.output_tokens as i64],
+                            );
+                        }
+                        let migrated = json_path.with_extension("json.migrated");
+                        let _ = fs::rename(&json_path, &migrated);
+                        tracing::info!("已从 JSON 迁移 {} 条 API Key 到 SQLite", records.len());
+                    }
+                }
+            }
         }
 
-        let manager = Self {
-            keys: Mutex::new(keys),
-            store_path,
-        };
-        manager.save_to_disk();
+        let manager = Self { conn: Mutex::new(conn) };
+
+        // 确保 initial_key 存在
+        let count: i64 = manager.conn.lock()
+            .query_row("SELECT COUNT(*) FROM api_keys", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if count == 0 {
+            let _ = manager.conn.lock().execute(
+                "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
+                params![Uuid::new_v4().to_string(), "Default", initial_key, Utc::now().to_rfc3339()],
+            );
+        } else if !initial_key.trim().is_empty() {
+            // 检查 initial_key 是否已存在（常量时间比较）
+            let keys: Vec<String> = {
+                let conn = manager.conn.lock();
+                let mut stmt = conn.prepare("SELECT key FROM api_keys").unwrap();
+                stmt.query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            };
+            if !keys.iter().any(|k| auth::constant_time_eq(k.as_str(), initial_key.as_str())) {
+                let _ = manager.conn.lock().execute(
+                    "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
+                    params![Uuid::new_v4().to_string(), "Config API Key", initial_key, Utc::now().to_rfc3339()],
+                );
+            }
+        }
+
         manager
     }
 
     pub fn authenticate(&self, incoming: &str) -> Option<AuthenticatedApiKey> {
-        let mut keys = self.keys.lock();
+        let conn = self.conn.lock();
         let now = Utc::now().to_rfc3339();
-        for item in keys.iter_mut().filter(|k| k.enabled) {
-            if auth::constant_time_eq(item.key.as_str(), incoming) {
-                item.last_used_at = Some(now);
-                return Some(AuthenticatedApiKey {
-                    key_id: item.id.clone(),
-                });
+        let mut stmt = conn
+            .prepare("SELECT id, key FROM api_keys WHERE enabled = 1")
+            .ok()?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (id, key) in &rows {
+            if auth::constant_time_eq(key.as_str(), incoming) {
+                let _ = conn.execute(
+                    "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                );
+                return Some(AuthenticatedApiKey { key_id: id.clone() });
             }
         }
         None
     }
 
     pub fn record_usage(&self, key_id: &str, input_tokens: u64, output_tokens: u64) {
-        let mut keys = self.keys.lock();
-        if let Some(item) = keys.iter_mut().find(|k| k.id == key_id) {
-            item.request_count = item.request_count.saturating_add(1);
-            item.input_tokens = item.input_tokens.saturating_add(input_tokens);
-            item.output_tokens = item.output_tokens.saturating_add(output_tokens);
-            item.last_used_at = Some(Utc::now().to_rfc3339());
-            drop(keys);
-            self.save_to_disk();
-        }
+        let conn = self.conn.lock();
+        let now = Utc::now().to_rfc3339();
+        let _ = conn.execute(
+            "UPDATE api_keys SET request_count = request_count + 1, input_tokens = input_tokens + ?1, output_tokens = output_tokens + ?2, last_used_at = ?3 WHERE id = ?4",
+            params![input_tokens as i64, output_tokens as i64, now, key_id],
+        );
     }
 
     pub fn list(&self) -> Vec<ApiKeyPublicInfo> {
-        self.keys
-            .lock()
-            .iter()
-            .map(|k| ApiKeyPublicInfo {
-                id: k.id.clone(),
-                name: k.name.clone(),
-                key: k.key.clone(),
-                enabled: k.enabled,
-                created_at: k.created_at.clone(),
-                last_used_at: k.last_used_at.clone(),
-                request_count: k.request_count,
-                input_tokens: k.input_tokens,
-                output_tokens: k.output_tokens,
-                key_preview: preview_key(&k.key),
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens FROM api_keys")
+            .unwrap();
+        stmt.query_map([], |row| {
+            let key: String = row.get(2)?;
+            Ok(ApiKeyPublicInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                key: key.clone(),
+                enabled: row.get::<_, i32>(3)? != 0,
+                created_at: row.get(4)?,
+                last_used_at: row.get(5)?,
+                request_count: row.get::<_, i64>(6)? as u64,
+                input_tokens: row.get::<_, i64>(7)? as u64,
+                output_tokens: row.get::<_, i64>(8)? as u64,
+                key_preview: preview_key(&key),
             })
-            .collect()
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     pub fn overview(&self) -> ApiKeyUsageOverview {
-        let keys = self.keys.lock();
+        let conn = self.conn.lock();
+        let (total, enabled, requests, input, output) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END), COALESCE(SUM(request_count),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) FROM api_keys",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)? as usize,
+                    row.get::<_, i64>(1)? as usize,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, i64>(4)? as u64,
+                )),
+            )
+            .unwrap_or((0, 0, 0, 0, 0));
         ApiKeyUsageOverview {
-            total_keys: keys.len(),
-            enabled_keys: keys.iter().filter(|k| k.enabled).count(),
-            total_requests: keys.iter().map(|k| k.request_count).sum(),
-            total_input_tokens: keys.iter().map(|k| k.input_tokens).sum(),
-            total_output_tokens: keys.iter().map(|k| k.output_tokens).sum(),
+            total_keys: total,
+            enabled_keys: enabled,
+            total_requests: requests,
+            total_input_tokens: input,
+            total_output_tokens: output,
         }
     }
 
@@ -168,64 +236,31 @@ impl ApiKeyManager {
             input_tokens: 0,
             output_tokens: 0,
         };
-        self.keys.lock().push(item.clone());
-        self.save_to_disk();
+        let conn = self.conn.lock();
+        let _ = conn.execute(
+            "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
+            params![item.id, item.name, item.key, item.created_at],
+        );
         item
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> bool {
-        let mut keys = self.keys.lock();
-        if let Some(item) = keys.iter_mut().find(|k| k.id == id) {
-            item.enabled = enabled;
-            drop(keys);
-            self.save_to_disk();
-            return true;
-        }
-        false
+        let conn = self.conn.lock();
+        let changed = conn
+            .execute(
+                "UPDATE api_keys SET enabled = ?1 WHERE id = ?2",
+                params![enabled as i32, id],
+            )
+            .unwrap_or(0);
+        changed > 0
     }
 
     pub fn delete_key(&self, id: &str) -> bool {
-        let mut keys = self.keys.lock();
-        let original = keys.len();
-        keys.retain(|k| k.id != id);
-        let changed = keys.len() != original;
-        drop(keys);
-        if changed {
-            self.save_to_disk();
-        }
-        changed
-    }
-
-    fn load_from(path: &Option<PathBuf>) -> Option<Vec<ApiKeyRecord>> {
-        let p = path.as_ref()?;
-        let content = fs::read_to_string(p).ok()?;
-        serde_json::from_str::<Vec<ApiKeyRecord>>(&content).ok()
-    }
-
-    fn save_to_disk(&self) {
-        let path = match &self.store_path {
-            Some(p) => p,
-            None => return,
-        };
-
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                tracing::warn!("创建 API Key 存储目录失败: {}", e);
-                return;
-            }
-        }
-
-        let content = match serde_json::to_string_pretty(&*self.keys.lock()) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("序列化 API Key 失败: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = fs::write(path, content) {
-            tracing::warn!("写入 API Key 文件失败: {}", e);
-        }
+        let conn = self.conn.lock();
+        let changed = conn
+            .execute("DELETE FROM api_keys WHERE id = ?1", params![id])
+            .unwrap_or(0);
+        changed > 0
     }
 }
 

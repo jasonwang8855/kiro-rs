@@ -14,6 +14,7 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   ApiStatsResponse,
+  TotalBalanceResponse,
 } from '@/types/api'
 
 const api = axios.create({
@@ -119,5 +120,20 @@ export async function deleteApiKey(id: string): Promise<SuccessResponse> {
 
 export async function getApiStats(): Promise<ApiStatsResponse> {
   const { data } = await api.get<ApiStatsResponse>('/stats')
+  return data
+}
+
+export async function getTotalBalance(): Promise<TotalBalanceResponse> {
+  const { data } = await api.get<TotalBalanceResponse>('/balance/total')
+  return data
+}
+
+export async function exportCredentials(): Promise<unknown[]> {
+  const { data } = await api.get<unknown[]>('/credentials/export')
+  return data
+}
+
+export async function exportCredential(id: number): Promise<unknown> {
+  const { data } = await api.get<unknown>(`/credentials/${id}/export`)
   return data
 }

@@ -16,6 +16,7 @@ use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
+    TotalBalanceResponse,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -156,6 +157,38 @@ impl AdminService {
         Ok(balance)
     }
 
+    /// 获取所有凭据的汇总余额
+    pub async fn get_total_balance(&self) -> TotalBalanceResponse {
+        let snapshot = self.token_manager.snapshot();
+        let active_ids: Vec<u64> = snapshot
+            .entries
+            .iter()
+            .filter(|e| !e.disabled)
+            .map(|e| e.id)
+            .collect();
+
+        let mut total_usage_limit = 0.0;
+        let mut total_current_usage = 0.0;
+        let mut total_remaining = 0.0;
+        let mut count = 0usize;
+
+        for id in active_ids {
+            if let Ok(b) = self.get_balance(id).await {
+                total_usage_limit += b.usage_limit;
+                total_current_usage += b.current_usage;
+                total_remaining += b.remaining;
+                count += 1;
+            }
+        }
+
+        TotalBalanceResponse {
+            total_usage_limit,
+            total_current_usage,
+            total_remaining,
+            credential_count: count,
+        }
+    }
+
     /// 从上游获取余额（无缓存）
     async fn fetch_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         let usage = self
@@ -276,6 +309,18 @@ impl AdminService {
             return Ok(());
         }
         anyhow::bail!("api key 不存在: {}", id)
+    }
+
+    /// 导出所有凭据（用于备份/迁移）
+    pub fn export_credentials(&self) -> Vec<KiroCredentials> {
+        self.token_manager.export_credentials()
+    }
+
+    /// 导出单个凭据（用于备份/迁移）
+    pub fn export_credential(&self, id: u64) -> Result<KiroCredentials, AdminServiceError> {
+        self.token_manager
+            .export_credential(id)
+            .map_err(|e| self.classify_error(e, id))
     }
 
     /// 获取负载均衡模式

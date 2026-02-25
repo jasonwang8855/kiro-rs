@@ -117,6 +117,7 @@ pub fn create_kiro_oauth_router(admin: AdminState, config: Config) -> Router {
     Router::new()
         .route("/", get(select_page))
         .route("/start", get(start_auth))
+        .route("/start-json", post(start_auth_json))
         .route("/status", get(check_status))
         .route("/import", post(import_token))
         .with_state(state)
@@ -195,6 +196,103 @@ async fn start_auth(
     state.sessions.lock().insert(state_id, session.clone());
 
     Html(render_start_html(&session)).into_response()
+}
+
+async fn start_auth_json(
+    State(state): State<KiroOAuthWebState>,
+    Json(query): Json<StartQuery>,
+) -> impl IntoResponse {
+    let method = query.method.trim().to_lowercase();
+    let (auth_method, start_url, region) = match method.as_str() {
+        "builder-id" => (
+            "builder-id".to_string(),
+            BUILDER_ID_START_URL.to_string(),
+            DEFAULT_IDC_REGION.to_string(),
+        ),
+        "idc" => {
+            let start = query.start_url.unwrap_or_default().trim().to_string();
+            if start.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "startUrl is required for IDC"})),
+                )
+                    .into_response();
+            }
+            let region = query
+                .region
+                .unwrap_or_else(|| DEFAULT_IDC_REGION.to_string())
+                .trim()
+                .to_string();
+            ("idc".to_string(), start, region)
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Unknown method"})),
+            )
+                .into_response()
+        }
+    };
+
+    let client = match build_http_client(&state.config) {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    let register = match register_client(&client, &region).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response()
+        }
+    };
+
+    let start = match start_device_authorization(
+        &client,
+        &region,
+        &register.client_id,
+        &register.client_secret,
+        &start_url,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, Json(json!({"error": e}))).into_response()
+        }
+    };
+
+    let state_id = Uuid::new_v4().to_string();
+    let session = WebAuthSession {
+        state_id: state_id.clone(),
+        device_code: start.device_code,
+        user_code: start.user_code.clone(),
+        verification_uri_complete: start.verification_uri_complete.clone(),
+        expires_in: start.expires_in.max(60),
+        started_at: Utc::now(),
+        status: SessionStatus::Pending,
+        error: None,
+        auth_method,
+        client_id: register.client_id,
+        client_secret: register.client_secret,
+        region,
+        credential_id: None,
+    };
+
+    state.sessions.lock().insert(state_id.clone(), session);
+
+    Json(json!({
+        "stateId": state_id,
+        "userCode": start.user_code,
+        "verificationUri": start.verification_uri_complete,
+        "expiresIn": start.expires_in.max(60)
+    }))
+    .into_response()
 }
 
 async fn check_status(

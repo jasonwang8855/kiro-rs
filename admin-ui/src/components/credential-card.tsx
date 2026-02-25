@@ -1,6 +1,6 @@
 ﻿import { useState } from 'react'
 import { toast } from 'sonner'
-import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2 } from 'lucide-react'
+import { RefreshCw, ChevronUp, ChevronDown, Wallet, Trash2, Download } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -16,6 +16,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { cn } from '@/lib/utils'
+import { extractErrorMessage } from '@/lib/utils'
+import { exportCredential } from '@/api/credentials'
 import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
 import {
   useSetDisabled,
@@ -148,6 +150,23 @@ export function CredentialCard({
         toast.error('删除失败: ' + (err as Error).message)
       },
     })
+  }
+
+  const handleExport = async () => {
+    try {
+      const data = await exportCredential(credential.id)
+      const json = JSON.stringify(data, null, 2)
+      const blob = new Blob([json], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `credential-${credential.id}-${Date.now()}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('凭据导出成功')
+    } catch (err) {
+      toast.error(`导出失败: ${extractErrorMessage(err)}`)
+    }
   }
 
   return (
@@ -336,6 +355,16 @@ export function CredentialCard({
               <Button size="sm" variant="secondary" className="h-8 bg-transparent text-neutral-300 hover:text-white" onClick={() => onViewBalance(credential.id)}>
                 <Wallet className="mr-1 h-3 w-3" />
                 查询余额
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-8 bg-transparent text-neutral-300 hover:text-white"
+                onClick={handleExport}
+                title="导出凭据"
+              >
+                <Download className="mr-1 h-3 w-3" />
+                导出
               </Button>
               <Button
                 size="sm"

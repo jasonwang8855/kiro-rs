@@ -6,8 +6,28 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * 解析后端错误响应，提取用户友好的错误信息
+ * 复制文本到剪贴板（兼容非 HTTPS 环境）
+ * navigator.clipboard 仅在 secure context (HTTPS/localhost) 下可用，
+ * 公网 HTTP 部署时回退到 execCommand
  */
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  // fallback: textarea + execCommand
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
 export interface ParsedError {
   /** 简短的错误标题 */
   title: string

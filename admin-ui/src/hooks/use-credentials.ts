@@ -14,6 +14,7 @@ import {
   setApiKeyDisabled,
   deleteApiKey,
   getApiStats,
+  getTotalBalance,
 } from '@/api/credentials'
 import type { AddCredentialRequest, CreateApiKeyRequest } from '@/types/api'
 
@@ -116,6 +117,14 @@ export function useApiStats() {
     queryKey: ['apiStats'],
     queryFn: getApiStats,
     refetchInterval: 30000,
+  })
+}
+
+export function useTotalBalance() {
+  return useQuery({
+    queryKey: ['totalBalance'],
+    queryFn: getTotalBalance,
+    refetchInterval: 60000,
   })
 }
 

@@ -124,3 +124,10 @@ export interface ApiUsageOverview {
 export interface ApiStatsResponse {
   overview: ApiUsageOverview
 }
+
+export interface TotalBalanceResponse {
+  totalUsageLimit: number
+  totalCurrentUsage: number
+  totalRemaining: number
+  credentialCount: number
+}

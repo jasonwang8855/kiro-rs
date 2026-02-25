@@ -286,11 +286,10 @@ pub async fn post_messages(
 
     if payload.stream {
         // 流式响应
-        state
-            .api_keys
-            .record_usage(&auth.key_id, input_tokens.max(0) as u64, 0);
         handle_stream_request(
             provider,
+            state.api_keys.clone(),
+            auth.key_id.clone(),
             &request_body,
             &payload.model,
             input_tokens,
@@ -314,6 +313,8 @@ pub async fn post_messages(
 /// 处理流式请求
 async fn handle_stream_request(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
     request_body: &str,
     model: &str,
     input_tokens: i32,
@@ -332,7 +333,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events);
+    let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id);
 
     // 返回 SSE 响应
     Response::builder()
@@ -357,6 +358,8 @@ fn create_sse_stream(
     response: reqwest::Response,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -369,8 +372,8 @@ fn create_sse_stream(
     let body_stream = response.bytes_stream();
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS))),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), api_keys, key_id, false),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded)| async move {
             if finished {
                 return None;
             }
@@ -407,26 +410,34 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
-                            // 发送最终事件并结束
+                            // 记录用量
+                            if !usage_recorded {
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true)))
                         }
                         None => {
-                            // 流结束，发送最终事件
+                            // 流结束，记录用量
+                            if !usage_recorded {
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                            }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true)))
                         }
                     }
                 }
@@ -434,7 +445,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded)))
                 }
             }
         },
@@ -589,7 +600,14 @@ async fn handle_non_stream_request(
     let output_tokens = token::estimate_output_tokens(&content);
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
-    let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);
+    let (token_source, final_input_tokens) = match context_input_tokens {
+        Some(v) => ("upstream(contextUsageEvent)", v),
+        None => ("local(estimate)", input_tokens),
+    };
+    tracing::info!(
+        "token 统计 [非流式] [{}]: input={}, output={}",
+        token_source, final_input_tokens, output_tokens
+    );
     api_keys.record_usage(
         auth_key_id,
         final_input_tokens.max(0) as u64,
@@ -785,11 +803,10 @@ pub async fn post_messages_cc(
 
     if payload.stream {
         // 流式响应（缓冲模式）
-        state
-            .api_keys
-            .record_usage(&auth.key_id, input_tokens.max(0) as u64, 0);
         handle_stream_request_buffered(
             provider,
+            state.api_keys.clone(),
+            auth.key_id.clone(),
             &request_body,
             &payload.model,
             input_tokens,
@@ -816,6 +833,8 @@ pub async fn post_messages_cc(
 /// 然后用从 contextUsageEvent 计算的正确 input_tokens 生成 message_start 事件。
 async fn handle_stream_request_buffered(
     provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
     request_body: &str,
     model: &str,
     estimated_input_tokens: i32,
@@ -831,7 +850,7 @@ async fn handle_stream_request_buffered(
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx);
+    let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id);
 
     // 返回 SSE 响应
     Response::builder()
@@ -853,6 +872,8 @@ async fn handle_stream_request_buffered(
 fn create_buffered_sse_stream(
     response: reqwest::Response,
     ctx: BufferedStreamContext,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
 
@@ -863,8 +884,10 @@ fn create_buffered_sse_stream(
             EventStreamDecoder::new(),
             false,
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            api_keys,
+            key_id,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id)| async move {
             if finished {
                 return None;
             }
@@ -879,7 +902,7 @@ fn create_buffered_sse_stream(
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
                         let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)));
+                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id)));
                     }
 
                     // 然后处理数据流
@@ -908,22 +931,26 @@ fn create_buffered_sse_stream(
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
-                                // 发生错误，完成处理并返回所有事件
+                                // 记录用量
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id)));
                             }
                             None => {
-                                // 流结束，完成处理并返回所有事件（已更正 input_tokens）
+                                // 流结束，记录用量
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id)));
                             }
                         }
                     }
