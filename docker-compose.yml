@@ -7,5 +7,5 @@
     ports:
       - "8990:8990"
     volumes:
-      - ./config:/app/config
+      - ./config.json:/app/config/config.json
     restart: unless-stopped
