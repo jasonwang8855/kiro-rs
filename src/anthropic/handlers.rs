@@ -383,7 +383,7 @@ struct StreamLogCtx {
     key_id: String,
     start: Instant,
     request_body: String,
-    response_text: String,
+    response_events: Vec<serde_json::Value>,
 }
 
 impl StreamLogCtx {
@@ -402,7 +402,7 @@ impl StreamLogCtx {
                 status: status.to_string(),
                 api_key_id: self.key_id.clone(),
                 request_body: self.request_body.clone(),
-                response_body: self.response_text.clone(),
+                response_body: serde_json::to_string(&self.response_events).unwrap_or_default(),
             });
         }
     }
@@ -428,7 +428,7 @@ fn create_sse_stream(
             .map(|e| Ok(Bytes::from(e.to_sse_string()))),
     );
 
-    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_text: String::new() };
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
 
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
@@ -457,13 +457,12 @@ fn create_sse_stream(
                                     Ok(frame) => {
                                         if let Ok(event) = Event::from_frame(frame) {
                                             let sse_events = ctx.process_kiro_event(&event);
-                                            // 从 SSE 事件中提取回复文本
+                                            // 收集 SSE 事件数据用于日志
                                             for se in &sse_events {
-                                                if se.event == "content_block_delta" {
-                                                    if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
-                                                        log_ctx.response_text.push_str(text);
-                                                    }
-                                                }
+                                                log_ctx.response_events.push(json!({
+                                                    "event": se.event,
+                                                    "data": se.data,
+                                                }));
                                             }
                                             events.extend(sse_events);
                                         }
@@ -689,24 +688,6 @@ async fn handle_non_stream_request(
         final_input_tokens.max(0) as u64,
         output_tokens.max(0) as u64,
     );
-    if let Some(log) = &request_log {
-        log.push(RequestLogEntry {
-            id: Uuid::new_v4().to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            model: model.to_string(),
-            stream: false,
-            message_count,
-            input_tokens: final_input_tokens,
-            output_tokens,
-            token_source: token_source.to_string(),
-            duration_ms: start.elapsed().as_millis() as u64,
-            status: "success".to_string(),
-            api_key_id: auth_key_id.to_string(),
-            request_body: log_request_body.clone(),
-            response_body: text_content.clone(),
-        });
-    }
-
     // 构建 Anthropic 响应
     let response_body = json!({
         "id": format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
@@ -721,6 +702,24 @@ async fn handle_non_stream_request(
             "output_tokens": output_tokens
         }
     });
+
+    if let Some(log) = &request_log {
+        log.push(RequestLogEntry {
+            id: Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            model: model.to_string(),
+            stream: false,
+            message_count,
+            input_tokens: final_input_tokens,
+            output_tokens,
+            token_source: token_source.to_string(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            status: "success".to_string(),
+            api_key_id: auth_key_id.to_string(),
+            request_body: log_request_body.clone(),
+            response_body: serde_json::to_string(&response_body).unwrap_or_default(),
+        });
+    }
 
     (StatusCode::OK, Json(response_body)).into_response()
 }
@@ -994,7 +993,7 @@ fn create_buffered_sse_stream(
     log_request_body: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
-    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_text: String::new() };
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
 
     stream::unfold(
         (
@@ -1051,17 +1050,14 @@ fn create_buffered_sse_stream(
                             }
                             Some(Err(e)) => {
                                 tracing::error!("读取响应流失败: {}", e);
-                                // 记录用量
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
                                 let all_events = ctx.finish_and_get_all_events();
-                                // 从缓冲的事件中提取回复文本
                                 for se in &all_events {
-                                    if se.event == "content_block_delta" {
-                                        if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
-                                            log_ctx.response_text.push_str(text);
-                                        }
-                                    }
+                                    log_ctx.response_events.push(json!({
+                                        "event": se.event,
+                                        "data": se.data,
+                                    }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
@@ -1075,13 +1071,11 @@ fn create_buffered_sse_stream(
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
                                 let all_events = ctx.finish_and_get_all_events();
-                                // 从缓冲的事件中提取回复文本
                                 for se in &all_events {
-                                    if se.event == "content_block_delta" {
-                                        if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
-                                            log_ctx.response_text.push_str(text);
-                                        }
-                                    }
+                                    log_ctx.response_events.push(json!({
+                                        "event": se.event,
+                                        "data": se.data,
+                                    }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), "success");
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
