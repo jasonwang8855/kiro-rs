@@ -1,5 +1,5 @@
 ﻿import { useMemo, useState } from 'react'
-import { LogOut, Plus, RefreshCw, Server, KeyRound, ShieldCheck, Copy } from 'lucide-react'
+import { LogOut, Plus, RefreshCw, Copy, ShieldCheck } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -8,6 +8,14 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { CredentialCard } from '@/components/credential-card'
 import { BalanceDialog } from '@/components/balance-dialog'
 import { AddCredentialDialog } from '@/components/add-credential-dialog'
@@ -22,6 +30,7 @@ import {
   useDeleteApiKey,
   useSetApiKeyDisabled,
 } from '@/hooks/use-credentials'
+import { useScrambleText } from '@/hooks/use-scramble-text'
 import { extractErrorMessage } from '@/lib/utils'
 
 interface DashboardProps {
@@ -35,7 +44,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [batchImportDialogOpen, setBatchImportDialogOpen] = useState(false)
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
   const [oauthDialogOpen, setOauthDialogOpen] = useState(false)
-  const [newApiKeyName, setNewApiKeyName] = useState('Default Key')
+  const [newApiKeyName, setNewApiKeyName] = useState('')
+  const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
@@ -44,6 +54,9 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { mutate: createApiKey, isPending: creatingApiKey } = useCreateApiKey()
   const { mutate: setApiKeyDisabled } = useSetApiKeyDisabled()
   const { mutate: deleteApiKey } = useDeleteApiKey()
+  const totalCredentialsDisplay = useScrambleText(String(data?.total || 0), !isLoading)
+  const activeCredentialsDisplay = useScrambleText(String(data?.available || 0), !isLoading)
+  const apiRequestsDisplay = useScrambleText(String(apiStatsData?.overview.totalRequests ?? 0), !isLoading)
 
   const sortedApiKeys = useMemo(
     () => [...(apiKeysData?.keys || [])].sort((a, b) => Number(b.enabled) - Number(a.enabled)),
@@ -64,7 +77,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const handleCreateApiKey = () => {
     const name = newApiKeyName.trim()
     if (!name) {
-      toast.error('请输入 API Key 名称')
+      toast.error('请输入 API 密钥名称')
       return
     }
 
@@ -91,23 +104,27 @@ export function Dashboard({ onLogout }: DashboardProps) {
     }
   }
 
+
+
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary" />
+      <div className="flex min-h-screen items-center justify-center bg-black">
+        <div className="orbital-loader" />
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="flex min-h-screen items-center justify-center bg-black p-4">
         <Card className="w-full max-w-md">
-          <CardContent className="pt-6 text-center space-y-4">
-            <div className="text-red-500">加载失败：{(error as Error).message}</div>
+          <CardContent className="space-y-4 pt-6 text-center">
+            <div className="text-red-400">加载失败：{(error as Error).message}</div>
             <div className="flex justify-center gap-2">
               <Button onClick={() => refetch()}>重试</Button>
-              <Button variant="outline" onClick={handleLogout}>重新登录</Button>
+              <Button variant="secondary" onClick={handleLogout}>
+                重新登录
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -116,165 +133,179 @@ export function Dashboard({ onLogout }: DashboardProps) {
   }
 
   return (
-    <div className="min-h-screen bg-admin-grid">
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-        <div className="container flex h-14 items-center justify-between px-4 md:px-8">
-          <div className="flex items-center gap-2">
-            <Server className="h-5 w-5" />
-            <span className="font-semibold">Kiro Admin</span>
+    <div className="min-h-screen bg-black">
+      <main
+        className="mx-auto grid max-w-[1600px] grid-cols-1 gap-4 p-6 md:grid-cols-12"
+      >
+        <section className="col-span-1 flex flex-col gap-3 md:col-span-12 md:flex-row md:items-center md:justify-between">
+          <div className="font-mono text-xs tracking-normal text-neutral-500">
+            KIRO-RS // 控制中心
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="icon" onClick={() => refetch()}>
-              <RefreshCw className="h-5 w-5" />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => setOauthDialogOpen(true)} size="sm" variant="secondary">
+              <ShieldCheck className="mr-2 h-4 w-4" />
+              OAuth 导入
             </Button>
-            <Button variant="ghost" size="icon" onClick={handleLogout}>
-              <LogOut className="h-5 w-5" />
+            <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="secondary">
+              KAM 导入
+            </Button>
+            <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="secondary">
+              批量导入
+            </Button>
+            <Button onClick={() => setAddDialogOpen(true)} size="sm">
+              <Plus className="mr-2 h-4 w-4" />
+              添加凭据
+            </Button>
+            <Button variant="secondary" size="icon" onClick={() => refetch()}>
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button variant="secondary" size="icon" onClick={handleLogout}>
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
-        </div>
-      </header>
+        </section>
 
-      <main className="container mx-auto px-4 md:px-8 py-6 space-y-6">
-        <Card className="overflow-hidden border-0 bg-gradient-to-r from-slate-900 via-sky-900 to-cyan-900 text-white shadow-lg">
-          <CardContent className="p-6 md:p-8">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-wider text-sky-200">Control Center</div>
-                <div className="text-2xl font-bold mt-1">Kiro Proxy 管理后台</div>
-                <div className="text-sm text-sky-100 mt-2">支持 OAuth 自动导入、API Key 管理和调用统计。</div>
-              </div>
-              <Button
-                variant="secondary"
-                className="bg-white/95 text-slate-900 hover:bg-white"
-                onClick={() => setOauthDialogOpen(true)}
-              >
-                <ShieldCheck className="h-4 w-4 mr-2" />
-                OAuth 一键导入
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card className="border-slate-200 bg-gradient-to-br from-white to-slate-50 shadow-sm">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">凭据总数</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold">{data?.total || 0}</div></CardContent>
-          </Card>
-          <Card className="border-emerald-200 bg-gradient-to-br from-emerald-50 to-lime-50 shadow-sm">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">可用凭据</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold text-green-600">{data?.available || 0}</div></CardContent>
-          </Card>
-          <Card className="border-sky-200 bg-gradient-to-br from-sky-50 to-blue-50 shadow-sm">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-muted-foreground">当前活跃</CardTitle></CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold flex items-center gap-2">#{data?.currentId || '-'} <Badge variant="success">Active</Badge></div>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card className="bg-gradient-to-br from-cyan-50 to-blue-50 border-cyan-100">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-slate-600">API 总调用</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold">{apiStatsData?.overview.totalRequests ?? 0}</div></CardContent>
-          </Card>
-          <Card className="bg-gradient-to-br from-emerald-50 to-teal-50 border-emerald-100">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-slate-600">输入 Tokens</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold">{apiStatsData?.overview.totalInputTokens ?? 0}</div></CardContent>
-          </Card>
-          <Card className="bg-gradient-to-br from-amber-50 to-orange-50 border-amber-100">
-            <CardHeader className="pb-2"><CardTitle className="text-sm text-slate-600">输出 Tokens</CardTitle></CardHeader>
-            <CardContent><div className="text-2xl font-bold">{apiStatsData?.overview.totalOutputTokens ?? 0}</div></CardContent>
-          </Card>
-        </div>
-
-        <Card className="border-slate-200 bg-white/90 backdrop-blur shadow-sm">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><KeyRound className="h-4 w-4" />API Key 管理</CardTitle>
+        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">总凭据数</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex gap-2">
-              <Input value={newApiKeyName} onChange={(e) => setNewApiKeyName(e.target.value)} placeholder="新 API Key 名称" />
-              <Button onClick={handleCreateApiKey} disabled={creatingApiKey}>创建</Button>
-            </div>
-            <div className="space-y-2">
-              {sortedApiKeys.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-xl border border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100/80 p-3 flex items-center justify-between gap-4 shadow-sm"
-                >
-                  <div className="min-w-0 space-y-1">
-                    <div className="font-medium">{item.name}</div>
-                    <div className="text-xs font-mono text-slate-700 break-all">{item.key || item.keyPreview}</div>
-                    <div className="text-xs text-muted-foreground">
-                      req: {item.requestCount} | in: {item.inputTokens} | out: {item.outputTokens}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => handleCopy(item.key || '', 'API Key')}
-                      disabled={!item.key}
-                    >
-                      <Copy className="h-4 w-4 mr-1" />
-                      复制
-                    </Button>
-                    <Switch
-                      checked={item.enabled}
-                      onCheckedChange={(checked) =>
-                        setApiKeyDisabled(
-                          { id: item.id, disabled: !checked },
-                          { onError: (err) => toast.error(extractErrorMessage(err)) }
-                        )
-                      }
-                    />
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      onClick={() => deleteApiKey(item.id, { onError: (err) => toast.error(extractErrorMessage(err)) })}
-                    >
-                      删除
-                    </Button>
-                  </div>
-                </div>
-              ))}
+          <CardContent>
+            <div className="text-5xl font-mono font-light tracking-tight text-white">{totalCredentialsDisplay}</div>
+          </CardContent>
+        </Card>
+
+        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">活跃凭据</CardTitle>
+          </CardHeader>
+          <CardContent className="flex items-end justify-between gap-3">
+            <div className="text-5xl font-mono font-light tracking-tight text-white">{activeCredentialsDisplay}</div>
+            <Badge variant="secondary" className="mb-1 font-mono text-[10px] tracking-wider text-neutral-400">当前 #{data?.currentId || '-'}</Badge>
+          </CardContent>
+        </Card>
+
+        <Card className="col-span-1 md:col-span-4 border-white/10 bg-[#050505]">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-xs font-sans font-medium tracking-wide text-neutral-500">API 请求量</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="text-5xl font-mono font-light tracking-tight text-white">{apiRequestsDisplay}</div>
+            <div className="text-xs font-mono tracking-widest text-neutral-500 uppercase">
+              IN <span className="text-white">{apiStatsData?.overview.totalInputTokens ?? 0}</span> <span className="text-neutral-700">/</span> OUT <span className="text-white">{apiStatsData?.overview.totalOutputTokens ?? 0}</span>
             </div>
           </CardContent>
         </Card>
 
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold">凭据管理</h2>
-            <div className="flex gap-2">
-              <Button onClick={() => setOauthDialogOpen(true)} size="sm" variant="outline">
-                OAuth 导入
+        <section className="col-span-1 md:col-span-12 mt-4">
+          <h2 className="mb-4 px-1 font-sans text-sm font-medium tracking-wide text-neutral-500">凭据列表</h2>
+          <div>
+            {data?.credentials.length === 0 ? (
+              <div className="ghost-credentials relative grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                <div className="h-40 rounded-lg border border-white/5 bg-black/20" />
+                <div className="h-40 rounded-lg border border-white/5 bg-black/20" />
+                <div className="h-40 rounded-lg border border-white/5 bg-black/20" />
+                <div className="h-40 rounded-lg border border-white/5 bg-black/20" />
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <span className="font-sans text-sm font-medium text-neutral-500">暂无凭据配置</span>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {data?.credentials.map((credential) => (
+                  <CredentialCard
+                    key={credential.id}
+                    credential={credential}
+                    onViewBalance={handleViewBalance}
+                    selected={false}
+                    onToggleSelect={() => {}}
+                    balance={null}
+                    loadingBalance={false}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="col-span-1 md:col-span-12 mt-4">
+          <h2 className="mb-4 px-1 font-mono text-sm tracking-normal text-neutral-400">API 密钥</h2>
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Input
+                value={newApiKeyName}
+                onChange={(e) => setNewApiKeyName(e.target.value)}
+                placeholder="新 API 密钥名称"
+                className="font-mono max-w-md"
+              />
+              <Button onClick={handleCreateApiKey} disabled={creatingApiKey} className="sm:w-auto">
+                创建
               </Button>
-              <Button onClick={() => setKamImportDialogOpen(true)} size="sm" variant="outline">KAM 导入</Button>
-              <Button onClick={() => setBatchImportDialogOpen(true)} size="sm" variant="outline">批量导入</Button>
-              <Button onClick={() => setAddDialogOpen(true)} size="sm"><Plus className="h-4 w-4 mr-2" />添加凭据</Button>
+            </div>
+
+            <div className="overflow-x-auto rounded-lg border border-white/10 bg-[#050505]">
+              <table className="w-full min-w-[860px] border-collapse">
+                <thead>
+                  <tr className="border-b border-white/10">
+                    <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">名称</th>
+                    <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">密钥</th>
+                    <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">统计</th>
+                    <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">状态</th>
+                    <th className="px-3 py-2 text-right font-sans text-xs font-medium tracking-wide text-neutral-500">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedApiKeys.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-8 text-center font-sans text-sm font-medium text-neutral-500">
+                        暂无 API 密钥
+                      </td>
+                    </tr>
+                  )}
+                  {sortedApiKeys.map((item) => (
+                    <tr key={item.id} className="border-b border-white/5 font-mono text-sm text-white">
+                      <td className="px-3 py-3 font-sans font-medium text-neutral-200">{item.name}</td>
+                      <td className="max-w-[420px] break-all px-3 py-3 text-neutral-400">{item.key || item.keyPreview}</td>
+                      <td className="px-3 py-3 text-neutral-400 font-sans text-xs">
+                        请求 <span className="font-mono text-white text-sm">{item.requestCount}</span> <span className="text-neutral-700">|</span> 输入 <span className="font-mono text-white text-sm">{item.inputTokens}</span> <span className="text-neutral-700">|</span> 输出 <span className="font-mono text-white text-sm">{item.outputTokens}</span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <Switch
+                          checked={item.enabled}
+                          onCheckedChange={(checked) =>
+                            setApiKeyDisabled(
+                              { id: item.id, disabled: !checked },
+                              { onError: (err) => toast.error(extractErrorMessage(err)) }
+                            )
+                          }
+                        />
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => handleCopy(item.key || '', 'API 密钥')}
+                            disabled={!item.key}
+                          >
+                            <Copy className="mr-1 h-4 w-4" />
+                            复制
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => setDeleteKeyId(item.id)}
+                          >
+                            删除
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
-
-          {data?.credentials.length === 0 ? (
-            <Card>
-              <CardContent className="py-8 text-center text-muted-foreground">暂无凭据</CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {data?.credentials.map((credential) => (
-                <CredentialCard
-                  key={credential.id}
-                  credential={credential}
-                  onViewBalance={handleViewBalance}
-                  selected={false}
-                  onToggleSelect={() => {}}
-                  balance={null}
-                  loadingBalance={false}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        </section>
       </main>
 
       <BalanceDialog
@@ -295,6 +326,30 @@ export function Dashboard({ onLogout }: DashboardProps) {
           queryClient.invalidateQueries({ queryKey: ['credentials'] })
         }}
       />
+
+      <Dialog open={deleteKeyId !== null} onOpenChange={(open) => !open && setDeleteKeyId(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>删除 API 密钥</DialogTitle>
+            <DialogDescription>此操作不可撤销，确认删除？</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setDeleteKeyId(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (!deleteKeyId) return
+                deleteApiKey(deleteKeyId, { onError: (err) => toast.error(extractErrorMessage(err)) })
+                setDeleteKeyId(null)
+              }}
+            >
+              确认
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

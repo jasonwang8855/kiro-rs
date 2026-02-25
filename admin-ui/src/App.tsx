@@ -23,11 +23,13 @@ function App() {
 
   return (
     <>
-      {isLoggedIn ? (
-        <Dashboard onLogout={handleLogout} />
-      ) : (
-        <LoginPage onLogin={handleLogin} />
-      )}
+      <div className="dialog-blur-bg">
+        {isLoggedIn ? (
+          <Dashboard onLogout={handleLogout} />
+        ) : (
+          <LoginPage onLogin={handleLogin} />
+        )}
+      </div>
       <Toaster position="top-right" />
     </>
   )

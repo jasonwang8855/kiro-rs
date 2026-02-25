@@ -1,5 +1,4 @@
 ﻿import { useState } from 'react'
-import { ShieldCheck } from 'lucide-react'
 import { storage } from '@/lib/storage'
 import { login } from '@/api/credentials'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -35,30 +34,29 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-admin-grid p-4">
-      <Card className="w-full max-w-md border-0 shadow-2xl">
-        <CardHeader className="text-center space-y-3">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-cyan-500 text-white shadow-lg">
-            <ShieldCheck className="h-7 w-7" />
-          </div>
-          <CardTitle className="text-2xl tracking-tight">Kiro Admin</CardTitle>
-          <CardDescription>使用账号密码登录管理后台</CardDescription>
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-black p-4">
+      <Card className="animate-fade-up w-full max-w-md border border-white/5 border-t-white/20 bg-black/50 backdrop-blur-2xl">
+        <CardHeader className="animate-fade-up animate-fade-up-delay-1 space-y-3 text-center">
+          <CardTitle className="font-mono text-2xl font-light tracking-[0.3em]">KIRO-RS</CardTitle>
+          <CardDescription className="text-neutral-400">登录控制中心</CardDescription>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
+        <CardContent className="animate-fade-up animate-fade-up-delay-2">
+          <form onSubmit={handleSubmit} className="space-y-6">
             <Input
               type="text"
               placeholder="用户名"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              className="h-11 rounded-none border-x-0 border-t-0 border-b border-white/20 bg-transparent px-0 font-mono focus-visible:border-white/50"
             />
             <Input
               type="password"
               placeholder="密码"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              className="h-11 rounded-none border-x-0 border-t-0 border-b border-white/20 bg-transparent px-0 font-mono focus-visible:border-white/50"
             />
-            {error && <div className="text-sm text-red-500">{error}</div>}
+            {error && <div className="text-sm text-red-400">{error}</div>}
             <Button type="submit" className="w-full" disabled={loading || !username.trim() || !password.trim()}>
               {loading ? '登录中...' : '登录'}
             </Button>

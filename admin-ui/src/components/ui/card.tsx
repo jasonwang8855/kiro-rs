@@ -4,16 +4,26 @@ import { cn } from '@/lib/utils'
 const Card = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    className={cn(
-      'rounded-lg border bg-card text-card-foreground shadow-sm',
-      className
-    )}
-    {...props}
-  />
-))
+>(({ className, onMouseMove, ...props }, ref) => {
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    e.currentTarget.style.setProperty('--mouse-x', `${e.clientX - rect.left}px`)
+    e.currentTarget.style.setProperty('--mouse-y', `${e.clientY - rect.top}px`)
+    onMouseMove?.(e)
+  }
+
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        'bento-card group relative overflow-hidden rounded-lg border border-white/10 bg-[#050505] text-card-foreground shadow-none',
+        className
+      )}
+      onMouseMove={handleMouseMove}
+      {...props}
+    />
+  )
+})
 Card.displayName = 'Card'
 
 const CardHeader = React.forwardRef<
