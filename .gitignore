@@ -1,7 +1,6 @@
 /target
 /CLAUDE.md
 /AGENTS.md
-/credentials.json
 /.idea
 /test.json
 /Cargo.lock
@@ -10,6 +9,5 @@
 /admin-ui/pnpm-lock.yaml
 /admin-ui/package-lock.json
 /admin-ui/tsconfig.tsbuildinfo
-/credentials.*
 /kiro_balance_cache.json
 /kiro_stats.json

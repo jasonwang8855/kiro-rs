@@ -27,12 +27,9 @@ RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 COPY --from=builder /app/target/release/kiro-rs /app/kiro-rs
-COPY docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh
 
 VOLUME ["/app/config"]
 
 EXPOSE 8990
 
-ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["./kiro-rs", "-c", "/app/config/config.json", "--credentials", "/app/config/credentials.json"]
