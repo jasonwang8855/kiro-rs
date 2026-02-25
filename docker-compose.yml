@@ -1,10 +1,6 @@
 ﻿services:
   kiro-rs:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runtime
-    image: kiro-rs:local
+    image: ghcr.io/jasonwang8855/kiro-rs:latest
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -14,15 +10,3 @@
       - ./config.json:/app/config/config.json
       - ./credentials.json:/app/config/credentials.json
     restart: unless-stopped
-
-  kiro-rs-test:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: tester
-    image: kiro-rs:test
-    container_name: kiro-rs-test
-    working_dir: /app
-    command: ["cargo", "test", "--all-targets", "--", "--nocapture"]
-    profiles:
-      - test
