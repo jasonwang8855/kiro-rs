@@ -13,6 +13,7 @@ use axum::{
 use crate::apikeys::{ApiKeyManager, AuthenticatedApiKey};
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
+use crate::request_log::RequestLog;
 
 use super::types::ErrorResponse;
 
@@ -21,6 +22,7 @@ pub struct AppState {
     pub api_keys: Arc<ApiKeyManager>,
     pub kiro_provider: Option<Arc<KiroProvider>>,
     pub profile_arn: Option<String>,
+    pub request_log: Option<Arc<RequestLog>>,
 }
 
 impl AppState {
@@ -29,6 +31,7 @@ impl AppState {
             api_keys,
             kiro_provider: None,
             profile_arn: None,
+            request_log: None,
         }
     }
 
@@ -39,6 +42,11 @@ impl AppState {
 
     pub fn with_profile_arn(mut self, arn: impl Into<String>) -> Self {
         self.profile_arn = Some(arn.into());
+        self
+    }
+
+    pub fn with_request_log(mut self, log: Arc<RequestLog>) -> Self {
+        self.request_log = Some(log);
         self
     }
 }

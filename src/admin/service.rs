@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::apikeys::{ApiKeyManager, ApiKeyPublicInfo, ApiKeyUsageOverview};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
+use crate::request_log::{RequestLog, RequestLogEntry};
 
 use super::error::AdminServiceError;
 use super::types::{
@@ -39,10 +40,11 @@ pub struct AdminService {
     api_keys: Arc<ApiKeyManager>,
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
+    request_log: Option<Arc<RequestLog>>,
 }
 
 impl AdminService {
-    pub fn new(token_manager: Arc<MultiTokenManager>, api_keys: Arc<ApiKeyManager>) -> Self {
+    pub fn new(token_manager: Arc<MultiTokenManager>, api_keys: Arc<ApiKeyManager>, request_log: Option<Arc<RequestLog>>) -> Self {
         let cache_path = token_manager
             .cache_dir()
             .map(|d| d.join("kiro_balance_cache.json"));
@@ -54,6 +56,7 @@ impl AdminService {
             api_keys,
             balance_cache: Mutex::new(balance_cache),
             cache_path,
+            request_log,
         }
     }
 
@@ -321,6 +324,14 @@ impl AdminService {
         self.token_manager
             .export_credential(id)
             .map_err(|e| self.classify_error(e, id))
+    }
+
+    /// 获取请求日志
+    pub fn get_request_logs(&self, since_id: Option<&str>) -> Vec<RequestLogEntry> {
+        match &self.request_log {
+            Some(log) => log.entries_since(since_id),
+            None => vec![],
+        }
     }
 
     /// 获取负载均衡模式

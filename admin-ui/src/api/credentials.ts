@@ -15,6 +15,7 @@ import type {
   CreateApiKeyResponse,
   ApiStatsResponse,
   TotalBalanceResponse,
+  RequestLogResponse,
 } from '@/types/api'
 
 const api = axios.create({
@@ -135,5 +136,11 @@ export async function exportCredentials(): Promise<unknown[]> {
 
 export async function exportCredential(id: number): Promise<unknown> {
   const { data } = await api.get<unknown>(`/credentials/${id}/export`)
+  return data
+}
+
+export async function getRequestLogs(sinceId?: string): Promise<RequestLogResponse> {
+  const params = sinceId ? { since_id: sinceId } : {}
+  const { data } = await api.get<RequestLogResponse>('/logs', { params })
   return data
 }

@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::IntoResponse,
 };
 
@@ -8,8 +8,9 @@ use super::{
     middleware::AdminState,
     types::{
         AddCredentialRequest, ApiKeyListResponse, ApiStatsResponse, CreateApiKeyRequest,
-        CreateApiKeyResponse, LoginRequest, LoginResponse, SetApiKeyDisabledRequest,
-        SetDisabledRequest, SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
+        CreateApiKeyResponse, LoginRequest, LoginResponse, RequestLogResponse,
+        SetApiKeyDisabledRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
+        SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -202,4 +203,17 @@ pub async fn export_credential(
 
 pub async fn get_total_balance(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_total_balance().await)
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct LogQuery {
+    pub since_id: Option<String>,
+}
+
+pub async fn get_request_logs(
+    State(state): State<AdminState>,
+    Query(query): Query<LogQuery>,
+) -> impl IntoResponse {
+    let entries = state.service.get_request_logs(query.since_id.as_deref());
+    Json(RequestLogResponse { entries })
 }

@@ -7,6 +7,7 @@ mod http_client;
 mod kiro;
 mod kiro_oauth_web;
 mod model;
+pub mod request_log;
 pub mod token;
 
 use std::path::Path;
@@ -61,6 +62,7 @@ async fn main() {
         .parent()
         .map(|p| p.join("api_keys.db"));
     let api_keys = Arc::new(apikeys::ApiKeyManager::new(api_key.clone(), api_key_store));
+    let request_log = Arc::new(request_log::RequestLog::new());
 
     let proxy_config = config.proxy_url.as_ref().map(|url| {
         let mut proxy = http_client::ProxyConfig::new(url);
@@ -96,6 +98,7 @@ async fn main() {
         api_keys.clone(),
         Some(kiro_provider),
         first_credentials.profile_arn.clone(),
+        Some(request_log.clone()),
     );
 
     let admin_enabled = config
@@ -110,7 +113,7 @@ async fn main() {
             .unwrap_or(false);
 
     let app = if admin_enabled {
-        let admin_service = admin::AdminService::new(token_manager.clone(), api_keys.clone());
+        let admin_service = admin::AdminService::new(token_manager.clone(), api_keys.clone(), Some(request_log.clone()));
 
         let admin_username = config
             .admin_username

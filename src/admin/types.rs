@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::request_log::RequestLogEntry;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogResponse {
+    pub entries: Vec<RequestLogEntry>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsStatusResponse {

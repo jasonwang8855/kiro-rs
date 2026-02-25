@@ -131,3 +131,21 @@ export interface TotalBalanceResponse {
   totalRemaining: number
   credentialCount: number
 }
+
+export interface RequestLogEntry {
+  id: string
+  timestamp: string
+  model: string
+  stream: boolean
+  messageCount: number
+  inputTokens: number
+  outputTokens: number
+  tokenSource: string
+  durationMs: number
+  status: string
+  apiKeyId: string
+}
+
+export interface RequestLogResponse {
+  entries: RequestLogEntry[]
+}

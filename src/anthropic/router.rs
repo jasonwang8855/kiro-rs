@@ -11,6 +11,7 @@ use axum::{
 
 use crate::apikeys::ApiKeyManager;
 use crate::kiro::provider::KiroProvider;
+use crate::request_log::RequestLog;
 
 use super::{
     handlers::{count_tokens, get_models, post_messages, post_messages_cc},
@@ -23,6 +24,7 @@ pub fn create_router_with_provider(
     api_keys: Arc<ApiKeyManager>,
     kiro_provider: Option<KiroProvider>,
     profile_arn: Option<String>,
+    request_log: Option<Arc<RequestLog>>,
 ) -> Router {
     let mut state = AppState::new(api_keys);
     if let Some(provider) = kiro_provider {
@@ -30,6 +32,9 @@ pub fn create_router_with_provider(
     }
     if let Some(arn) = profile_arn {
         state = state.with_profile_arn(arn);
+    }
+    if let Some(log) = request_log {
+        state = state.with_request_log(log);
     }
 
     let v1_routes = Router::new()

@@ -1075,6 +1075,13 @@ impl StreamContext {
         );
         (input, self.output_tokens)
     }
+
+    pub fn token_source(&self) -> &str {
+        match self.context_input_tokens {
+            Some(_) => "upstream(contextUsageEvent)",
+            None => "local(estimate)",
+        }
+    }
 }
 
 /// 缓冲流处理上下文 - 用于 /cc/v1/messages 流式请求
@@ -1179,6 +1186,13 @@ impl BufferedStreamContext {
             source, input, self.inner.output_tokens
         );
         (input, self.inner.output_tokens)
+    }
+
+    pub fn token_source(&self) -> &str {
+        match self.inner.context_input_tokens {
+            Some(_) => "upstream(contextUsageEvent)",
+            None => "local(estimate)",
+        }
     }
 }
 

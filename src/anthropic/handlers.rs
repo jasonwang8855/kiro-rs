@@ -1,11 +1,13 @@
 //! Anthropic API Handler 函数
 
 use std::convert::Infallible;
+use std::time::Instant;
 
 use crate::apikeys::AuthenticatedApiKey;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::request_log::{RequestLog, RequestLogEntry};
 use crate::token;
 use anyhow::Error;
 use axum::{
@@ -269,6 +271,9 @@ pub async fn post_messages(
 
     tracing::debug!("Kiro request body: {}", request_body);
 
+    let message_count = payload.messages.len();
+    let start = Instant::now();
+
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
         payload.model.clone(),
@@ -294,6 +299,9 @@ pub async fn post_messages(
             &payload.model,
             input_tokens,
             thinking_enabled,
+            state.request_log.clone(),
+            message_count,
+            start,
         )
         .await
     } else {
@@ -305,6 +313,9 @@ pub async fn post_messages(
             &request_body,
             &payload.model,
             input_tokens,
+            state.request_log.clone(),
+            message_count,
+            start,
         )
         .await
     }
@@ -319,6 +330,9 @@ async fn handle_stream_request(
     model: &str,
     input_tokens: i32,
     thinking_enabled: bool,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    message_count: usize,
+    start: Instant,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api_stream(request_body).await {
@@ -333,7 +347,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id);
+    let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id, request_log, model.to_string(), message_count, start);
 
     // 返回 SSE 响应
     Response::builder()
@@ -353,6 +367,35 @@ fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
+/// 流式请求日志上下文
+struct StreamLogCtx {
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    model: String,
+    message_count: usize,
+    key_id: String,
+    start: Instant,
+}
+
+impl StreamLogCtx {
+    fn record(&self, input: i32, output: i32, token_source: &str, status: &str) {
+        if let Some(log) = &self.request_log {
+            log.push(RequestLogEntry {
+                id: Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                model: self.model.clone(),
+                stream: true,
+                message_count: self.message_count,
+                input_tokens: input,
+                output_tokens: output,
+                token_source: token_source.to_string(),
+                duration_ms: self.start.elapsed().as_millis() as u64,
+                status: status.to_string(),
+                api_key_id: self.key_id.clone(),
+            });
+        }
+    }
+}
+
 /// 创建 SSE 事件流
 fn create_sse_stream(
     response: reqwest::Response,
@@ -360,6 +403,10 @@ fn create_sse_stream(
     initial_events: Vec<SseEvent>,
     api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
     key_id: String,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    model: String,
+    message_count: usize,
+    start: Instant,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -368,12 +415,14 @@ fn create_sse_stream(
             .map(|e| Ok(Bytes::from(e.to_sse_string()))),
     );
 
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start };
+
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
 
     let processing_stream = stream::unfold(
-        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), api_keys, key_id, false),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded)| async move {
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), api_keys, key_id, false, log_ctx),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded, log_ctx)| async move {
             if finished {
                 return None;
             }
@@ -410,7 +459,7 @@ fn create_sse_stream(
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
 
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx)))
                         }
                         Some(Err(e)) => {
                             tracing::error!("读取响应流失败: {}", e);
@@ -418,26 +467,28 @@ fn create_sse_stream(
                             if !usage_recorded {
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                             }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx)))
                         }
                         None => {
                             // 流结束，记录用量
                             if !usage_recorded {
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), "success");
                             }
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
                                 .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                 .collect();
-                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true)))
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx)))
                         }
                     }
                 }
@@ -445,7 +496,7 @@ fn create_sse_stream(
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded)))
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx)))
                 }
             }
         },
@@ -466,6 +517,9 @@ async fn handle_non_stream_request(
     request_body: &str,
     model: &str,
     input_tokens: i32,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    message_count: usize,
+    start: Instant,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api(request_body).await {
@@ -613,6 +667,21 @@ async fn handle_non_stream_request(
         final_input_tokens.max(0) as u64,
         output_tokens.max(0) as u64,
     );
+    if let Some(log) = &request_log {
+        log.push(RequestLogEntry {
+            id: Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            model: model.to_string(),
+            stream: false,
+            message_count,
+            input_tokens: final_input_tokens,
+            output_tokens,
+            token_source: token_source.to_string(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            status: "success".to_string(),
+            api_key_id: auth_key_id.to_string(),
+        });
+    }
 
     // 构建 Anthropic 响应
     let response_body = json!({
@@ -786,6 +855,9 @@ pub async fn post_messages_cc(
 
     tracing::debug!("Kiro request body: {}", request_body);
 
+    let message_count = payload.messages.len();
+    let start = Instant::now();
+
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
         payload.model.clone(),
@@ -811,6 +883,9 @@ pub async fn post_messages_cc(
             &payload.model,
             input_tokens,
             thinking_enabled,
+            state.request_log.clone(),
+            message_count,
+            start,
         )
         .await
     } else {
@@ -822,6 +897,9 @@ pub async fn post_messages_cc(
             &request_body,
             &payload.model,
             input_tokens,
+            state.request_log.clone(),
+            message_count,
+            start,
         )
         .await
     }
@@ -839,6 +917,9 @@ async fn handle_stream_request_buffered(
     model: &str,
     estimated_input_tokens: i32,
     thinking_enabled: bool,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    message_count: usize,
+    start: Instant,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api_stream(request_body).await {
@@ -850,7 +931,7 @@ async fn handle_stream_request_buffered(
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id);
+    let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id, request_log, model.to_string(), message_count, start);
 
     // 返回 SSE 响应
     Response::builder()
@@ -874,8 +955,13 @@ fn create_buffered_sse_stream(
     ctx: BufferedStreamContext,
     api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
     key_id: String,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    model: String,
+    message_count: usize,
+    start: Instant,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start };
 
     stream::unfold(
         (
@@ -886,8 +972,9 @@ fn create_buffered_sse_stream(
             interval(Duration::from_secs(PING_INTERVAL_SECS)),
             api_keys,
             key_id,
+            log_ctx,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, log_ctx)| async move {
             if finished {
                 return None;
             }
@@ -902,7 +989,7 @@ fn create_buffered_sse_stream(
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
                         let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(create_ping_sse())];
-                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id)));
+                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, log_ctx)));
                     }
 
                     // 然后处理数据流
@@ -934,23 +1021,25 @@ fn create_buffered_sse_stream(
                                 // 记录用量
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx)));
                             }
                             None => {
                                 // 流结束，记录用量
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), "success");
                                 let all_events = ctx.finish_and_get_all_events();
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
                                     .collect();
-                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id)));
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx)));
                             }
                         }
                     }

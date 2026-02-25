@@ -22,6 +22,7 @@ import { AddCredentialDialog } from '@/components/add-credential-dialog'
 import { BatchImportDialog } from '@/components/batch-import-dialog'
 import { KamImportDialog } from '@/components/kam-import-dialog'
 import { KiroOAuthDialog } from '@/components/kiro-oauth-dialog'
+import { RequestLogPanel } from '@/components/request-log-panel'
 import {
   useApiKeys,
   useApiStats,
@@ -51,6 +52,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [batchValidating, setBatchValidating] = useState(false)
+  const [logMonitorEnabled, setLogMonitorEnabled] = useState(false)
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
@@ -416,6 +418,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
             </div>
           </div>
         </section>
+
+        <RequestLogPanel enabled={logMonitorEnabled} onToggle={setLogMonitorEnabled} />
       </main>
 
       <BalanceDialog
