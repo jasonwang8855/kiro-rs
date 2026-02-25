@@ -194,6 +194,36 @@ impl SseEvent {
             serde_json::to_string(&self.data).unwrap_or_default()
         )
     }
+
+    /// 提取纯文本内容（用于非 JSON 模式）
+    ///
+    /// 只从 content_block_delta 事件中提取 text_delta 和 thinking_delta 的文本内容，
+    /// 其他事件返回空字符串。
+    pub fn to_text_string(&self) -> String {
+        if self.event != "content_block_delta" {
+            return String::new();
+        }
+        if let Some(delta) = self.data.get("delta") {
+            match delta.get("type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    return delta
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                }
+                Some("thinking_delta") => {
+                    return delta
+                        .get("thinking")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                }
+                _ => {}
+            }
+        }
+        String::new()
+    }
 }
 
 /// 内容块状态
