@@ -273,6 +273,11 @@ pub async fn post_messages(
 
     let message_count = payload.messages.len();
     let start = Instant::now();
+    let log_request_body = if state.request_log.is_some() {
+        serde_json::to_string(&payload).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
@@ -302,6 +307,7 @@ pub async fn post_messages(
             state.request_log.clone(),
             message_count,
             start,
+            log_request_body,
         )
         .await
     } else {
@@ -316,6 +322,7 @@ pub async fn post_messages(
             state.request_log.clone(),
             message_count,
             start,
+            log_request_body,
         )
         .await
     }
@@ -333,6 +340,7 @@ async fn handle_stream_request(
     request_log: Option<std::sync::Arc<RequestLog>>,
     message_count: usize,
     start: Instant,
+    log_request_body: String,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api_stream(request_body).await {
@@ -347,7 +355,7 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id, request_log, model.to_string(), message_count, start);
+    let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id, request_log, model.to_string(), message_count, start, log_request_body);
 
     // 返回 SSE 响应
     Response::builder()
@@ -374,6 +382,8 @@ struct StreamLogCtx {
     message_count: usize,
     key_id: String,
     start: Instant,
+    request_body: String,
+    response_text: String,
 }
 
 impl StreamLogCtx {
@@ -391,6 +401,8 @@ impl StreamLogCtx {
                 duration_ms: self.start.elapsed().as_millis() as u64,
                 status: status.to_string(),
                 api_key_id: self.key_id.clone(),
+                request_body: self.request_body.clone(),
+                response_body: self.response_text.clone(),
             });
         }
     }
@@ -407,6 +419,7 @@ fn create_sse_stream(
     model: String,
     message_count: usize,
     start: Instant,
+    log_request_body: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     // 先发送初始事件
     let initial_stream = stream::iter(
@@ -415,14 +428,14 @@ fn create_sse_stream(
             .map(|e| Ok(Bytes::from(e.to_sse_string()))),
     );
 
-    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start };
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_text: String::new() };
 
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
     let body_stream = response.bytes_stream();
 
     let processing_stream = stream::unfold(
         (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), api_keys, key_id, false, log_ctx),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded, log_ctx)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded, mut log_ctx)| async move {
             if finished {
                 return None;
             }
@@ -444,6 +457,14 @@ fn create_sse_stream(
                                     Ok(frame) => {
                                         if let Ok(event) = Event::from_frame(frame) {
                                             let sse_events = ctx.process_kiro_event(&event);
+                                            // 从 SSE 事件中提取回复文本
+                                            for se in &sse_events {
+                                                if se.event == "content_block_delta" {
+                                                    if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
+                                                        log_ctx.response_text.push_str(text);
+                                                    }
+                                                }
+                                            }
                                             events.extend(sse_events);
                                         }
                                     }
@@ -520,6 +541,7 @@ async fn handle_non_stream_request(
     request_log: Option<std::sync::Arc<RequestLog>>,
     message_count: usize,
     start: Instant,
+    log_request_body: String,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api(request_body).await {
@@ -680,6 +702,8 @@ async fn handle_non_stream_request(
             duration_ms: start.elapsed().as_millis() as u64,
             status: "success".to_string(),
             api_key_id: auth_key_id.to_string(),
+            request_body: log_request_body.clone(),
+            response_body: text_content.clone(),
         });
     }
 
@@ -857,6 +881,11 @@ pub async fn post_messages_cc(
 
     let message_count = payload.messages.len();
     let start = Instant::now();
+    let log_request_body = if state.request_log.is_some() {
+        serde_json::to_string(&payload).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     // 估算输入 tokens
     let input_tokens = token::count_all_tokens(
@@ -886,6 +915,7 @@ pub async fn post_messages_cc(
             state.request_log.clone(),
             message_count,
             start,
+            log_request_body,
         )
         .await
     } else {
@@ -900,6 +930,7 @@ pub async fn post_messages_cc(
             state.request_log.clone(),
             message_count,
             start,
+            log_request_body,
         )
         .await
     }
@@ -920,6 +951,7 @@ async fn handle_stream_request_buffered(
     request_log: Option<std::sync::Arc<RequestLog>>,
     message_count: usize,
     start: Instant,
+    log_request_body: String,
 ) -> Response {
     // 调用 Kiro API（支持多凭据故障转移）
     let response = match provider.call_api_stream(request_body).await {
@@ -931,7 +963,7 @@ async fn handle_stream_request_buffered(
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id, request_log, model.to_string(), message_count, start);
+    let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id, request_log, model.to_string(), message_count, start, log_request_body);
 
     // 返回 SSE 响应
     Response::builder()
@@ -959,9 +991,10 @@ fn create_buffered_sse_stream(
     model: String,
     message_count: usize,
     start: Instant,
+    log_request_body: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
     let body_stream = response.bytes_stream();
-    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start };
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_text: String::new() };
 
     stream::unfold(
         (
@@ -974,7 +1007,7 @@ fn create_buffered_sse_stream(
             key_id,
             log_ctx,
         ),
-        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, log_ctx)| async move {
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, mut log_ctx)| async move {
             if finished {
                 return None;
             }
@@ -1021,8 +1054,16 @@ fn create_buffered_sse_stream(
                                 // 记录用量
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
-                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                                 let all_events = ctx.finish_and_get_all_events();
+                                // 从缓冲的事件中提取回复文本
+                                for se in &all_events {
+                                    if se.event == "content_block_delta" {
+                                        if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
+                                            log_ctx.response_text.push_str(text);
+                                        }
+                                    }
+                                }
+                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))
@@ -1033,8 +1074,16 @@ fn create_buffered_sse_stream(
                                 // 流结束，记录用量
                                 let (input, output) = ctx.final_usage();
                                 api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
-                                log_ctx.record(input, output, ctx.token_source(), "success");
                                 let all_events = ctx.finish_and_get_all_events();
+                                // 从缓冲的事件中提取回复文本
+                                for se in &all_events {
+                                    if se.event == "content_block_delta" {
+                                        if let Some(text) = se.data.pointer("/delta/text").and_then(|v| v.as_str()) {
+                                            log_ctx.response_text.push_str(text);
+                                        }
+                                    }
+                                }
+                                log_ctx.record(input, output, ctx.token_source(), "success");
                                 let bytes: Vec<Result<Bytes, Infallible>> = all_events
                                     .into_iter()
                                     .map(|e| Ok(Bytes::from(e.to_sse_string())))

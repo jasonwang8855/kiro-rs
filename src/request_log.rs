@@ -19,6 +19,8 @@ pub struct RequestLogEntry {
     pub duration_ms: u64,
     pub status: String,
     pub api_key_id: String,
+    pub request_body: String,
+    pub response_body: String,
 }
 
 pub struct RequestLog {

@@ -144,6 +144,8 @@ export interface RequestLogEntry {
   durationMs: number
   status: string
   apiKeyId: string
+  requestBody: string
+  responseBody: string
 }
 
 export interface RequestLogResponse {

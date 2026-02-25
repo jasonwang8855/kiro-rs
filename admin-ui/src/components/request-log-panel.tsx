@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ScrollText, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, ScrollText, Trash2 } from 'lucide-react'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -13,6 +13,7 @@ interface RequestLogPanelProps {
 
 export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
   const [entries, setEntries] = useState<RequestLogEntry[]>([])
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const lastSeenIdRef = useRef<string | undefined>(undefined)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -49,6 +50,16 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
 
   const handleClear = () => {
     setEntries([])
+    setExpandedIds(new Set())
+  }
+
+  const toggleExpand = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
 
   const formatTime = (ts: string) => {
@@ -57,6 +68,14 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
       return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
     } catch {
       return ts
+    }
+  }
+
+  const formatJson = (raw: string) => {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2)
+    } catch {
+      return raw
     }
   }
 
@@ -85,6 +104,7 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
           <table className="w-full min-w-[1000px] border-collapse">
             <thead>
               <tr className="border-b border-white/10 text-left text-xs text-neutral-500">
+                <th className="w-6 px-2 py-2"></th>
                 <th className="px-3 py-2 font-medium">时间</th>
                 <th className="px-3 py-2 font-medium">模型</th>
                 <th className="px-3 py-2 font-medium">流式</th>
@@ -99,44 +119,61 @@ export function RequestLogPanel({ enabled, onToggle }: RequestLogPanelProps) {
             <tbody>
               {entries.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-6 text-center text-sm text-neutral-600">
+                  <td colSpan={10} className="px-3 py-6 text-center text-sm text-neutral-600">
                     等待请求...
                   </td>
                 </tr>
               )}
-              {entries.map((e) => (
-                <tr key={e.id} className="border-b border-white/5 font-mono text-sm text-white">
-                  <td className="px-3 py-2 text-neutral-400 text-xs">{formatTime(e.timestamp)}</td>
-                  <td className="px-3 py-2">
-                    <Badge variant="secondary" className="text-xs font-mono">{e.model}</Badge>
-                  </td>
-                  <td className="px-3 py-2">
-                    {e.stream ? (
-                      <span className="text-emerald-400 text-xs">SSE</span>
-                    ) : (
-                      <span className="text-neutral-500 text-xs">JSON</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-neutral-300">{e.messageCount}</td>
-                  <td className="px-3 py-2 text-neutral-300">{e.inputTokens.toLocaleString()}</td>
-                  <td className="px-3 py-2 text-neutral-300">{e.outputTokens.toLocaleString()}</td>
-                  <td className="px-3 py-2 text-xs">
-                    {e.tokenSource.includes('contextUsage') ? (
-                      <span className="text-emerald-400">API</span>
-                    ) : (
-                      <span className="text-amber-400">估算</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-neutral-300">{(e.durationMs / 1000).toFixed(1)}s</td>
-                  <td className="px-3 py-2">
-                    {e.status === 'success' ? (
-                      <span className="text-emerald-400 text-xs">成功</span>
-                    ) : (
-                      <span className="text-red-400 text-xs" title={e.status}>失败</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {entries.map((e) => {
+                const isExpanded = expandedIds.has(e.id)
+                return (
+                  <tr key={e.id} className="group">
+                    <td colSpan={10} className="p-0">
+                      <div
+                        className="flex items-center border-b border-white/5 font-mono text-sm text-white cursor-pointer hover:bg-white/[0.02]"
+                        onClick={() => toggleExpand(e.id)}
+                      >
+                        <div className="w-6 px-2 py-2 text-neutral-600 flex-shrink-0">
+                          {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                        </div>
+                        <div className="px-3 py-2 text-neutral-400 text-xs min-w-[70px]">{formatTime(e.timestamp)}</div>
+                        <div className="px-3 py-2 min-w-[140px]">
+                          <Badge variant="secondary" className="text-xs font-mono">{e.model}</Badge>
+                        </div>
+                        <div className="px-3 py-2 min-w-[50px]">
+                          {e.stream ? <span className="text-emerald-400 text-xs">SSE</span> : <span className="text-neutral-500 text-xs">JSON</span>}
+                        </div>
+                        <div className="px-3 py-2 text-neutral-300 min-w-[50px]">{e.messageCount}</div>
+                        <div className="px-3 py-2 text-neutral-300 min-w-[80px]">{e.inputTokens.toLocaleString()}</div>
+                        <div className="px-3 py-2 text-neutral-300 min-w-[80px]">{e.outputTokens.toLocaleString()}</div>
+                        <div className="px-3 py-2 text-xs min-w-[50px]">
+                          {e.tokenSource.includes('contextUsage') ? <span className="text-emerald-400">API</span> : <span className="text-amber-400">估算</span>}
+                        </div>
+                        <div className="px-3 py-2 text-neutral-300 min-w-[60px]">{(e.durationMs / 1000).toFixed(1)}s</div>
+                        <div className="px-3 py-2 min-w-[50px]">
+                          {e.status === 'success' ? <span className="text-emerald-400 text-xs">成功</span> : <span className="text-red-400 text-xs" title={e.status}>失败</span>}
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="border-b border-white/5 bg-[#0a0a0a] px-4 py-3 space-y-3">
+                          <div>
+                            <div className="text-xs text-neutral-500 mb-1">请求内容</div>
+                            <pre className="text-xs text-neutral-300 bg-[#111] rounded p-3 overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre-wrap break-all">
+                              {e.requestBody ? formatJson(e.requestBody) : '(无)'}
+                            </pre>
+                          </div>
+                          <div>
+                            <div className="text-xs text-neutral-500 mb-1">回复内容</div>
+                            <pre className="text-xs text-neutral-300 bg-[#111] rounded p-3 overflow-x-auto max-h-[400px] overflow-y-auto whitespace-pre-wrap break-all">
+                              {e.responseBody || '(无)'}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
