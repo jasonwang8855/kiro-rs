@@ -8,7 +8,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::apikeys::{ApiKeyManager, ApiKeyPublicInfo, ApiKeyUsageOverview};
+use crate::apikeys::{ApiKeyManager, ApiKeyPublicInfo, ApiKeyRecord, ApiKeyUsageOverview, RoutingMode};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::request_log::{RequestLog, RequestLogEntry};
@@ -299,6 +299,9 @@ impl AdminService {
             .delete_credential(id)
             .map_err(|e| self.classify_delete_error(e, id))?;
 
+        // 清理引用该凭据的 Fixed API key，避免悬空 credential_id
+        self.api_keys.reset_routing_for_credential(id);
+
         // 清理已删除凭据的余额缓存
         {
             let mut cache = self.balance_cache.lock();
@@ -317,11 +320,36 @@ impl AdminService {
         self.api_keys.overview()
     }
 
-    pub fn create_api_key(&self, name: String) -> anyhow::Result<crate::apikeys::ApiKeyRecord> {
+    pub fn create_api_key(
+        &self,
+        name: String,
+        routing_mode: Option<RoutingMode>,
+        credential_id: Option<u64>,
+    ) -> anyhow::Result<ApiKeyRecord> {
         if name.trim().is_empty() {
             anyhow::bail!("name 不能为空");
         }
-        Ok(self.api_keys.create_key(name))
+        let routing_mode = routing_mode.unwrap_or_default();
+        self.validate_api_key_routing(routing_mode.clone(), credential_id)?;
+        Ok(self.api_keys.create_key(name, routing_mode, credential_id)?)
+    }
+
+    pub fn set_api_key_routing(
+        &self,
+        id: &str,
+        routing_mode: RoutingMode,
+        credential_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        // NOTE:
+        // 这里存在很小的 TOCTOU 窗口：校验后到写入前，凭据可能被并发删除。
+        // 删除凭据路径会调用 `reset_routing_for_credential` 清理悬空引用，
+        // 固定路由请求路径也会在运行时处理凭据不可用场景，因此可容忍该窗口。
+        self.validate_api_key_routing(routing_mode.clone(), credential_id)?;
+
+        if self.api_keys.set_routing(id, routing_mode, credential_id) {
+            return Ok(());
+        }
+        anyhow::bail!("api key 不存在: {}", id)
     }
 
     pub fn set_api_key_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
@@ -336,6 +364,31 @@ impl AdminService {
             return Ok(());
         }
         anyhow::bail!("api key 不存在: {}", id)
+    }
+
+    fn validate_api_key_routing(
+        &self,
+        routing_mode: RoutingMode,
+        credential_id: Option<u64>,
+    ) -> anyhow::Result<()> {
+        match routing_mode {
+            RoutingMode::Auto => {
+                if credential_id.is_some() {
+                    anyhow::bail!("auto 模式下 credential_id 必须为空");
+                }
+                Ok(())
+            }
+            RoutingMode::Fixed => {
+                let credential_id = credential_id
+                    .ok_or_else(|| anyhow::anyhow!("fixed 模式下 credential_id 必填"))?;
+                let snapshot = self.token_manager.snapshot();
+                let exists = snapshot.entries.iter().any(|entry| entry.id == credential_id);
+                if !exists {
+                    anyhow::bail!("凭据不存在: {}", credential_id);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// 导出所有凭据（用于备份/迁移）

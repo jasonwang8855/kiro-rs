@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::apikeys::RoutingMode;
 use crate::request_log::RequestLogEntry;
 use crate::sticky::{CredentialSnapshot, StickyStats, StreamSnapshot};
 
@@ -138,12 +139,23 @@ pub struct LoginResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CreateApiKeyRequest {
     pub name: String,
+    #[serde(default)]
+    pub routing_mode: Option<RoutingMode>,
+    #[serde(default)]
+    pub credential_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetApiKeyDisabledRequest {
     pub disabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetApiKeyRoutingRequest {
+    pub routing_mode: RoutingMode,
+    pub credential_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -160,6 +172,8 @@ pub struct CreateApiKeyResponse {
     pub name: String,
     pub key: String,
     pub key_preview: String,
+    pub routing_mode: RoutingMode,
+    pub credential_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]

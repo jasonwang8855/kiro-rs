@@ -9,7 +9,7 @@ use super::{
         export_credentials, get_all_credentials, get_api_stats, get_credential_balance,
         get_load_balancing_mode, get_log_enabled, get_request_logs, get_sticky_stats,
         get_sticky_status, get_sticky_streams, get_total_balance, list_api_keys, login,
-        reset_failure_count, set_api_key_disabled, set_credential_disabled,
+        reset_failure_count, set_api_key_disabled, set_api_key_routing, set_credential_disabled,
         set_credential_priority, set_load_balancing_mode, set_log_enabled,
     },
     middleware::{AdminState, admin_auth_middleware},
@@ -36,6 +36,7 @@ pub fn create_admin_router(state: AdminState) -> Router {
         .route("/apikeys", get(list_api_keys).post(create_api_key))
         .route("/apikeys/{id}", delete(delete_api_key))
         .route("/apikeys/{id}/disabled", post(set_api_key_disabled))
+        .route("/apikeys/{id}/routing", put(set_api_key_routing))
         .route("/stats", get(get_api_stats))
         .route("/logs", get(get_request_logs))
         .route("/logs/enabled", get(get_log_enabled).post(set_log_enabled))

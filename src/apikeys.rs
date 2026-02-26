@@ -9,6 +9,36 @@ use uuid::Uuid;
 
 use crate::common::auth;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingMode {
+    Auto,
+    Fixed,
+}
+
+impl Default for RoutingMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl RoutingMode {
+    fn as_db_value(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Fixed => "fixed",
+        }
+    }
+
+    fn from_db_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("fixed") {
+            Self::Fixed
+        } else {
+            Self::Auto
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyRecord {
@@ -21,6 +51,10 @@ pub struct ApiKeyRecord {
     pub request_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub routing_mode: RoutingMode,
+    #[serde(default)]
+    pub credential_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +70,8 @@ pub struct ApiKeyPublicInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub key_preview: String,
+    pub routing_mode: RoutingMode,
+    pub credential_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +87,8 @@ pub struct ApiKeyUsageOverview {
 #[derive(Debug, Clone)]
 pub struct AuthenticatedApiKey {
     pub key_id: String,
+    pub routing_mode: RoutingMode,
+    pub credential_id: Option<u64>,
 }
 
 pub struct ApiKeyManager {
@@ -88,6 +126,27 @@ impl ApiKeyManager {
         )
         .expect("建表失败");
 
+        // 幂等迁移：新增 routing_mode / credential_id 字段
+        let columns = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(api_keys)")
+                .expect("读取表结构失败");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("读取表结构失败")
+                .filter_map(|r| r.ok())
+                .collect::<Vec<String>>()
+        };
+
+        if !columns.iter().any(|c| c == "routing_mode") {
+            let _ = conn.execute(
+                "ALTER TABLE api_keys ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'auto'",
+                [],
+            );
+        }
+        if !columns.iter().any(|c| c == "credential_id") {
+            let _ = conn.execute("ALTER TABLE api_keys ADD COLUMN credential_id INTEGER", []);
+        }
+
         // 自动迁移旧 JSON 文件
         if let Some(db_path) = &store_path {
             let json_path = db_path.with_extension("json");
@@ -96,8 +155,20 @@ impl ApiKeyManager {
                     if let Ok(records) = serde_json::from_str::<Vec<ApiKeyRecord>>(&content) {
                         for r in &records {
                             let _ = conn.execute(
-                                "INSERT OR IGNORE INTO api_keys (id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                                params![r.id, r.name, r.key, r.enabled as i32, r.created_at, r.last_used_at, r.request_count as i64, r.input_tokens as i64, r.output_tokens as i64],
+                                "INSERT OR IGNORE INTO api_keys (id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens, routing_mode, credential_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                                params![
+                                    r.id,
+                                    r.name,
+                                    r.key,
+                                    r.enabled as i32,
+                                    r.created_at,
+                                    r.last_used_at,
+                                    r.request_count as i64,
+                                    r.input_tokens as i64,
+                                    r.output_tokens as i64,
+                                    r.routing_mode.as_db_value(),
+                                    r.credential_id.and_then(|id| i64::try_from(id).ok())
+                                ],
                             );
                         }
                         let migrated = json_path.with_extension("json.migrated");
@@ -117,8 +188,14 @@ impl ApiKeyManager {
 
         if count == 0 {
             let _ = manager.conn.lock().execute(
-                "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
-                params![Uuid::new_v4().to_string(), "Default", initial_key, Utc::now().to_rfc3339()],
+                "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens, routing_mode, credential_id) VALUES (?1,?2,?3,1,?4,0,0,0,?5,NULL)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    "Default",
+                    initial_key,
+                    Utc::now().to_rfc3339(),
+                    RoutingMode::Auto.as_db_value()
+                ],
             );
         } else if !initial_key.trim().is_empty() {
             // 检查 initial_key 是否已存在（常量时间比较）
@@ -132,8 +209,14 @@ impl ApiKeyManager {
             };
             if !keys.iter().any(|k| auth::constant_time_eq(k.as_str(), initial_key.as_str())) {
                 let _ = manager.conn.lock().execute(
-                    "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
-                    params![Uuid::new_v4().to_string(), "Config API Key", initial_key, Utc::now().to_rfc3339()],
+                    "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens, routing_mode, credential_id) VALUES (?1,?2,?3,1,?4,0,0,0,?5,NULL)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        "Config API Key",
+                        initial_key,
+                        Utc::now().to_rfc3339(),
+                        RoutingMode::Auto.as_db_value()
+                    ],
                 );
             }
         }
@@ -145,21 +228,34 @@ impl ApiKeyManager {
         let conn = self.conn.lock();
         let now = Utc::now().to_rfc3339();
         let mut stmt = conn
-            .prepare("SELECT id, key FROM api_keys WHERE enabled = 1")
+            .prepare("SELECT id, key, routing_mode, credential_id FROM api_keys WHERE enabled = 1")
             .ok()?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        let rows: Vec<(String, String, RoutingMode, Option<u64>)> = stmt
+            .query_map([], |row| {
+                let routing_mode_raw: String = row.get(2)?;
+                let credential_id_raw: Option<i64> = row.get(3)?;
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    RoutingMode::from_db_value(&routing_mode_raw),
+                    credential_id_raw.and_then(|id| u64::try_from(id).ok()),
+                ))
+            })
             .ok()?
             .filter_map(|r| r.ok())
             .collect();
 
-        for (id, key) in &rows {
+        for (id, key, routing_mode, credential_id) in rows {
             if auth::constant_time_eq(key.as_str(), incoming) {
                 let _ = conn.execute(
                     "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
-                    params![now, id],
+                    params![now, &id],
                 );
-                return Some(AuthenticatedApiKey { key_id: id.clone() });
+                return Some(AuthenticatedApiKey {
+                    key_id: id,
+                    routing_mode,
+                    credential_id,
+                });
             }
         }
         None
@@ -177,10 +273,12 @@ impl ApiKeyManager {
     pub fn list(&self) -> Vec<ApiKeyPublicInfo> {
         let conn = self.conn.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens FROM api_keys")
+            .prepare("SELECT id, name, key, enabled, created_at, last_used_at, request_count, input_tokens, output_tokens, routing_mode, credential_id FROM api_keys")
             .unwrap();
         stmt.query_map([], |row| {
             let key: String = row.get(2)?;
+            let routing_mode_raw: String = row.get(9)?;
+            let credential_id_raw: Option<i64> = row.get(10)?;
             Ok(ApiKeyPublicInfo {
                 id: row.get(0)?,
                 name: row.get(1)?,
@@ -192,6 +290,8 @@ impl ApiKeyManager {
                 input_tokens: row.get::<_, i64>(7)? as u64,
                 output_tokens: row.get::<_, i64>(8)? as u64,
                 key_preview: preview_key(&key),
+                routing_mode: RoutingMode::from_db_value(&routing_mode_raw),
+                credential_id: credential_id_raw.and_then(|id| u64::try_from(id).ok()),
             })
         })
         .unwrap()
@@ -223,7 +323,12 @@ impl ApiKeyManager {
         }
     }
 
-    pub fn create_key(&self, name: String) -> ApiKeyRecord {
+    pub fn create_key(
+        &self,
+        name: String,
+        routing_mode: RoutingMode,
+        credential_id: Option<u64>,
+    ) -> Result<ApiKeyRecord, rusqlite::Error> {
         let raw = format!("sk-kiro-rs-{}", Uuid::new_v4().simple());
         let item = ApiKeyRecord {
             id: Uuid::new_v4().to_string(),
@@ -235,13 +340,54 @@ impl ApiKeyManager {
             request_count: 0,
             input_tokens: 0,
             output_tokens: 0,
+            routing_mode,
+            credential_id,
+        };
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens, routing_mode, credential_id) VALUES (?1,?2,?3,1,?4,0,0,0,?5,?6)",
+            params![
+                &item.id,
+                &item.name,
+                &item.key,
+                &item.created_at,
+                item.routing_mode.as_db_value(),
+                item.credential_id.and_then(|id| i64::try_from(id).ok())
+            ],
+        )?;
+        Ok(item)
+    }
+
+    pub fn set_routing(
+        &self,
+        id: &str,
+        routing_mode: RoutingMode,
+        credential_id: Option<u64>,
+    ) -> bool {
+        let conn = self.conn.lock();
+        let changed = conn
+            .execute(
+                "UPDATE api_keys SET routing_mode = ?1, credential_id = ?2 WHERE id = ?3",
+                params![
+                    routing_mode.as_db_value(),
+                    credential_id.and_then(|id| i64::try_from(id).ok()),
+                    id
+                ],
+            )
+            .unwrap_or(0);
+        changed > 0
+    }
+
+    /// 将所有引用指定凭据的 API key 重置为 Auto 模式
+    pub fn reset_routing_for_credential(&self, credential_id: u64) {
+        let Ok(credential_id_i64) = i64::try_from(credential_id) else {
+            return;
         };
         let conn = self.conn.lock();
         let _ = conn.execute(
-            "INSERT INTO api_keys (id, name, key, enabled, created_at, request_count, input_tokens, output_tokens) VALUES (?1,?2,?3,1,?4,0,0,0)",
-            params![item.id, item.name, item.key, item.created_at],
+            "UPDATE api_keys SET routing_mode = 'auto', credential_id = NULL WHERE credential_id = ?1",
+            params![credential_id_i64],
         );
-        item
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> bool {

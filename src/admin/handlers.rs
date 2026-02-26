@@ -9,8 +9,8 @@ use super::{
     types::{
         AddCredentialRequest, ApiKeyListResponse, ApiStatsResponse, CreateApiKeyRequest,
         CreateApiKeyResponse, LoginRequest, LoginResponse, RequestLogResponse,
-        SetApiKeyDisabledRequest, SetDisabledRequest, SetLoadBalancingModeRequest,
-        SetPriorityRequest, SuccessResponse,
+        SetApiKeyDisabledRequest, SetApiKeyRoutingRequest, SetDisabledRequest,
+        SetLoadBalancingModeRequest, SetPriorityRequest, SuccessResponse,
     },
 };
 
@@ -125,7 +125,10 @@ pub async fn create_api_key(
     State(state): State<AdminState>,
     Json(payload): Json<CreateApiKeyRequest>,
 ) -> impl IntoResponse {
-    match state.service.create_api_key(payload.name) {
+    match state
+        .service
+        .create_api_key(payload.name, payload.routing_mode, payload.credential_id)
+    {
         Ok(key) => Json(CreateApiKeyResponse {
             success: true,
             id: key.id,
@@ -136,8 +139,30 @@ pub async fn create_api_key(
                 "********".to_string()
             },
             key: key.key,
+            routing_mode: key.routing_mode,
+            credential_id: key.credential_id,
         })
         .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::AdminErrorResponse::invalid_request(
+                e.to_string(),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn set_api_key_routing(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetApiKeyRoutingRequest>,
+) -> impl IntoResponse {
+    match state
+        .service
+        .set_api_key_routing(&id, payload.routing_mode, payload.credential_id)
+    {
+        Ok(_) => Json(SuccessResponse::new("更新成功")).into_response(),
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
             Json(super::types::AdminErrorResponse::invalid_request(
