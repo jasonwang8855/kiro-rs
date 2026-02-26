@@ -233,6 +233,20 @@ impl StickyTracker {
         }
     }
 
+    /// 获取指定 API key 的绑定凭据（如果存在且未过期）
+    pub fn get_bound_credential(&self, api_key: &str) -> Option<u64> {
+        let timeout = Duration::from_secs(u64::from(self.sticky_expiry_minutes).saturating_mul(60));
+        let now = Instant::now();
+        let bindings = self.bindings.lock();
+        bindings.get(api_key).and_then(|binding| {
+            if now.duration_since(binding.last_request_at) <= timeout {
+                Some(binding.credential_id)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn activate_stream(&self, stream_id: StreamId) {
         // 并发计数已在 reserve_stream 时递增，此处仅标记为已激活
         let mut active_streams = self.active_streams.lock();

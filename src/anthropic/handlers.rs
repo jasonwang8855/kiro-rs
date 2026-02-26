@@ -16,7 +16,7 @@ use axum::{
     Json as JsonExtractor,
     body::Body,
     extract::{Extension, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
 use bytes::Bytes;
@@ -34,6 +34,62 @@ use super::types::{
     OutputConfig, Thinking,
 };
 use super::websearch;
+
+/// 路由决策结果
+#[derive(Debug)]
+enum RouteDecision {
+    /// 绑定指定凭据（fixed 模式）
+    Fixed(u64),
+    /// Sticky 模式，用 X-User-Id 做身份绑定
+    Sticky(RequestIdentity),
+    /// 走全局负载均衡（priority 或 balanced）
+    Global,
+}
+
+/// 解析路由决策
+///
+/// 决策逻辑：
+/// 1. Fixed + credential_id → RouteDecision::Fixed(id)
+/// 2. Auto + sticky 模式 + 有 X-User-Id → RouteDecision::Sticky(identity)
+/// 3. 其余 → RouteDecision::Global
+fn resolve_route(
+    auth: &AuthenticatedApiKey,
+    headers: &HeaderMap,
+    state: &AppState,
+    provider: &crate::kiro::provider::KiroProvider,
+    metadata: Option<&crate::anthropic::types::Metadata>,
+) -> RouteDecision {
+    use crate::apikeys::RoutingMode;
+
+    // Fixed 模式：直接绑定凭据
+    if auth.routing_mode == RoutingMode::Fixed {
+        if let Some(cred_id) = auth.credential_id {
+            return RouteDecision::Fixed(cred_id);
+        }
+        // Fixed 但没有 credential_id（不应该发生，admin 校验过了），退化为 Global
+    }
+
+    // 检查是否 sticky 模式
+    let is_sticky =
+        state.sticky_tracker.is_some() && provider.token_manager().get_load_balancing_mode() == "sticky";
+
+    if is_sticky {
+        // 提取 X-User-Id header
+        if let Some(user_id) = headers.get("x-user-id").and_then(|v| v.to_str().ok()) {
+            if !user_id.is_empty() {
+                // 用 api_key_id + user_id 组合作为 sticky 身份，防止跨 key 伪造
+                let sticky_identity = format!("{}:{}", auth.key_id, user_id);
+                return RouteDecision::Sticky(RequestIdentity {
+                    api_key: sticky_identity,
+                    session_id: metadata.and_then(|m| m.user_id.clone()),
+                });
+            }
+        }
+        // 没有 X-User-Id，走 Global（当前行为是 priority）
+    }
+
+    RouteDecision::Global
+}
 
 /// 将 KiroProvider 错误映射为 HTTP 响应
 fn map_provider_error(err: Error) -> Response {
@@ -213,6 +269,7 @@ pub async fn get_models() -> impl IntoResponse {
 pub async fn post_messages(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedApiKey>,
+    headers: HeaderMap,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -253,7 +310,30 @@ pub async fn post_messages(
             payload.tools.clone(),
         ) as i32;
 
-        return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
+        // WebSearch 路径也执行路由决策，避免绕过 fixed/sticky
+        let route = resolve_route(
+            &auth,
+            &headers,
+            &state,
+            provider.as_ref(),
+            payload.metadata.as_ref(),
+        );
+        let fixed_credential_id = match route {
+            RouteDecision::Fixed(credential_id) => Some(credential_id),
+            RouteDecision::Sticky(identity) => state
+                .sticky_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.get_bound_credential(&identity.api_key)),
+            RouteDecision::Global => None,
+        };
+
+        return websearch::handle_websearch_request(
+            provider,
+            &payload,
+            input_tokens,
+            fixed_credential_id,
+        )
+        .await;
     }
 
     // 转换请求
@@ -323,90 +403,169 @@ pub async fn post_messages(
         .map(|t| t.is_enabled())
         .unwrap_or(false);
 
-    if payload.stream {
-        // 构建请求身份
-        let identity = RequestIdentity {
-            api_key: auth.key_id.clone(),
-            session_id: payload
-                .metadata
-                .as_ref()
-                .and_then(|m| m.user_id.clone()),
-        };
+    let route = resolve_route(
+        &auth,
+        &headers,
+        &state,
+        provider.as_ref(),
+        payload.metadata.as_ref(),
+    );
 
-        // 检查是否使用 sticky 模式
-        let is_sticky = state.sticky_tracker.is_some()
-            && provider
-                .token_manager()
-                .get_load_balancing_mode()
-                == "sticky";
-
-        if is_sticky {
-            // Sticky 模式：通过 StickyTracker 选择凭据
-            let (response, guard) = match provider
-                .call_api_stream_sticky(&request_body, &identity)
+    match route {
+        RouteDecision::Fixed(credential_id) => {
+            if payload.stream {
+                let response = match provider
+                    .call_api_stream_fixed(&request_body, credential_id)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return map_provider_error(e),
+                };
+                let mut ctx =
+                    StreamContext::new_with_thinking(&payload.model, input_tokens, thinking_enabled);
+                let initial_events = ctx.generate_initial_events();
+                let stream = create_sse_stream(
+                    response,
+                    ctx,
+                    initial_events,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    state.request_log.clone(),
+                    payload.model.to_string(),
+                    message_count,
+                    start,
+                    log_request_body,
+                );
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            } else {
+                handle_non_stream_request_fixed(
+                    provider,
+                    state.api_keys.clone(),
+                    &auth.key_id,
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                    credential_id,
+                )
                 .await
-            {
-                Ok(r) => r,
-                Err(e) => return map_sticky_error(e),
-            };
-
-            let mut ctx =
-                StreamContext::new_with_thinking(&payload.model, input_tokens, thinking_enabled);
-            let initial_events = ctx.generate_initial_events();
-
-            let stream = create_sse_stream_with_guard(
-                response,
-                ctx,
-                initial_events,
-                state.api_keys.clone(),
-                auth.key_id.clone(),
-                state.request_log.clone(),
-                payload.model.to_string(),
-                message_count,
-                start,
-                log_request_body,
-                guard,
-            );
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .header(header::CONNECTION, "keep-alive")
-                .body(Body::from_stream(stream))
-                .unwrap()
-        } else {
-            // 原有模式
-            handle_stream_request(
-                provider,
-                state.api_keys.clone(),
-                auth.key_id.clone(),
-                &request_body,
-                &payload.model,
-                input_tokens,
-                thinking_enabled,
-                state.request_log.clone(),
-                message_count,
-                start,
-                log_request_body,
-            )
-            .await
+            }
         }
-    } else {
-        // 非流式响应
-        handle_non_stream_request(
-            provider,
-            state.api_keys.clone(),
-            &auth.key_id,
-            &request_body,
-            &payload.model,
-            input_tokens,
-            state.request_log.clone(),
-            message_count,
-            start,
-            log_request_body,
-        )
-        .await
+        RouteDecision::Sticky(identity) => {
+            if payload.stream {
+                // Sticky 模式：通过 StickyTracker 选择凭据
+                let (response, guard) = match provider
+                    .call_api_stream_sticky(&request_body, &identity)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return map_sticky_error(e),
+                };
+
+                let mut ctx =
+                    StreamContext::new_with_thinking(&payload.model, input_tokens, thinking_enabled);
+                let initial_events = ctx.generate_initial_events();
+
+                let stream = create_sse_stream_with_guard(
+                    response,
+                    ctx,
+                    initial_events,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    state.request_log.clone(),
+                    payload.model.to_string(),
+                    message_count,
+                    start,
+                    log_request_body,
+                    guard,
+                );
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            } else {
+                // sticky 非流式：优先使用已绑定凭据，否则回退到 Global
+                let bound_cred = state
+                    .sticky_tracker
+                    .as_ref()
+                    .and_then(|tracker| tracker.get_bound_credential(&identity.api_key));
+                if let Some(credential_id) = bound_cred {
+                    handle_non_stream_request_fixed(
+                        provider,
+                        state.api_keys.clone(),
+                        &auth.key_id,
+                        &request_body,
+                        &payload.model,
+                        input_tokens,
+                        state.request_log.clone(),
+                        message_count,
+                        start,
+                        log_request_body,
+                        credential_id,
+                    )
+                    .await
+                } else {
+                    handle_non_stream_request(
+                        provider,
+                        state.api_keys.clone(),
+                        &auth.key_id,
+                        &request_body,
+                        &payload.model,
+                        input_tokens,
+                        state.request_log.clone(),
+                        message_count,
+                        start,
+                        log_request_body,
+                    )
+                    .await
+                }
+            }
+        }
+        RouteDecision::Global => {
+            if payload.stream {
+                handle_stream_request(
+                    provider,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    thinking_enabled,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                )
+                .await
+            } else {
+                handle_non_stream_request(
+                    provider,
+                    state.api_keys.clone(),
+                    &auth.key_id,
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                )
+                .await
+            }
+        }
     }
 }
 
@@ -723,6 +882,66 @@ async fn handle_non_stream_request(
         Err(e) => return map_provider_error(e),
     };
 
+    handle_non_stream_response(
+        response,
+        api_keys,
+        auth_key_id,
+        model,
+        input_tokens,
+        request_log,
+        message_count,
+        start,
+        log_request_body,
+    )
+    .await
+}
+
+/// 处理非流式请求（fixed 路由）
+async fn handle_non_stream_request_fixed(
+    provider: std::sync::Arc<crate::kiro::provider::KiroProvider>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    auth_key_id: &str,
+    request_body: &str,
+    model: &str,
+    input_tokens: i32,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    message_count: usize,
+    start: Instant,
+    log_request_body: String,
+    credential_id: u64,
+) -> Response {
+    // 调用 Kiro API（fixed 路由：绑定指定凭据）
+    let response = match provider.call_api_fixed(request_body, credential_id).await {
+        Ok(resp) => resp,
+        Err(e) => return map_provider_error(e),
+    };
+
+    handle_non_stream_response(
+        response,
+        api_keys,
+        auth_key_id,
+        model,
+        input_tokens,
+        request_log,
+        message_count,
+        start,
+        log_request_body,
+    )
+    .await
+}
+
+/// 处理非流式响应体解析与日志记录
+async fn handle_non_stream_response(
+    response: reqwest::Response,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    auth_key_id: &str,
+    model: &str,
+    input_tokens: i32,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    message_count: usize,
+    start: Instant,
+    log_request_body: String,
+) -> Response {
     // 读取响应体
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
@@ -970,6 +1189,7 @@ pub async fn count_tokens(
 pub async fn post_messages_cc(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthenticatedApiKey>,
+    headers: HeaderMap,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
     tracing::info!(
@@ -1011,7 +1231,30 @@ pub async fn post_messages_cc(
             payload.tools.clone(),
         ) as i32;
 
-        return websearch::handle_websearch_request(provider, &payload, input_tokens).await;
+        // WebSearch 路径也执行路由决策，避免绕过 fixed/sticky
+        let route = resolve_route(
+            &auth,
+            &headers,
+            &state,
+            provider.as_ref(),
+            payload.metadata.as_ref(),
+        );
+        let fixed_credential_id = match route {
+            RouteDecision::Fixed(credential_id) => Some(credential_id),
+            RouteDecision::Sticky(identity) => state
+                .sticky_tracker
+                .as_ref()
+                .and_then(|tracker| tracker.get_bound_credential(&identity.api_key)),
+            RouteDecision::Global => None,
+        };
+
+        return websearch::handle_websearch_request(
+            provider,
+            &payload,
+            input_tokens,
+            fixed_credential_id,
+        )
+        .await;
     }
 
     // 转换请求
@@ -1081,86 +1324,166 @@ pub async fn post_messages_cc(
         .map(|t| t.is_enabled())
         .unwrap_or(false);
 
-    if payload.stream {
-        // 构建请求身份
-        let identity = RequestIdentity {
-            api_key: auth.key_id.clone(),
-            session_id: payload
-                .metadata
-                .as_ref()
-                .and_then(|m| m.user_id.clone()),
-        };
+    let route = resolve_route(
+        &auth,
+        &headers,
+        &state,
+        provider.as_ref(),
+        payload.metadata.as_ref(),
+    );
 
-        // 检查是否使用 sticky 模式
-        let is_sticky = state.sticky_tracker.is_some()
-            && provider
-                .token_manager()
-                .get_load_balancing_mode()
-                == "sticky";
+    match route {
+        RouteDecision::Fixed(credential_id) => {
+            if payload.stream {
+                let response = match provider
+                    .call_api_stream_fixed(&request_body, credential_id)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return map_provider_error(e),
+                };
 
-        if is_sticky {
-            // Sticky 模式：通过 StickyTracker 选择凭据
-            let (response, guard) = match provider
-                .call_api_stream_sticky(&request_body, &identity)
+                let ctx = BufferedStreamContext::new(&payload.model, input_tokens, thinking_enabled);
+                let stream = create_buffered_sse_stream(
+                    response,
+                    ctx,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    state.request_log.clone(),
+                    payload.model.to_string(),
+                    message_count,
+                    start,
+                    log_request_body,
+                );
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            } else {
+                handle_non_stream_request_fixed(
+                    provider,
+                    state.api_keys.clone(),
+                    &auth.key_id,
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                    credential_id,
+                )
                 .await
-            {
-                Ok(r) => r,
-                Err(e) => return map_sticky_error(e),
-            };
-
-            let ctx = BufferedStreamContext::new(&payload.model, input_tokens, thinking_enabled);
-            let stream = create_buffered_sse_stream_with_guard(
-                response,
-                ctx,
-                state.api_keys.clone(),
-                auth.key_id.clone(),
-                state.request_log.clone(),
-                payload.model.to_string(),
-                message_count,
-                start,
-                log_request_body,
-                guard,
-            );
-
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .header(header::CACHE_CONTROL, "no-cache")
-                .header(header::CONNECTION, "keep-alive")
-                .body(Body::from_stream(stream))
-                .unwrap()
-        } else {
-            // 原有模式：缓冲流式响应
-            handle_stream_request_buffered(
-                provider,
-                state.api_keys.clone(),
-                auth.key_id.clone(),
-                &request_body,
-                &payload.model,
-                input_tokens,
-                thinking_enabled,
-                state.request_log.clone(),
-                message_count,
-                start,
-                log_request_body,
-            )
-            .await
+            }
         }
-    } else {
-        // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
-        handle_non_stream_request(
-            provider,
-            state.api_keys.clone(),
-            &auth.key_id,
-            &request_body,
-            &payload.model,
-            input_tokens,
-            state.request_log.clone(),
-            message_count,
-            start,
-            log_request_body,
-        )
-        .await
+        RouteDecision::Sticky(identity) => {
+            if payload.stream {
+                // Sticky 模式：通过 StickyTracker 选择凭据
+                let (response, guard) = match provider
+                    .call_api_stream_sticky(&request_body, &identity)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return map_sticky_error(e),
+                };
+
+                let ctx = BufferedStreamContext::new(&payload.model, input_tokens, thinking_enabled);
+                let stream = create_buffered_sse_stream_with_guard(
+                    response,
+                    ctx,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    state.request_log.clone(),
+                    payload.model.to_string(),
+                    message_count,
+                    start,
+                    log_request_body,
+                    guard,
+                );
+
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .header(header::CONNECTION, "keep-alive")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            } else {
+                // sticky 非流式：优先使用已绑定凭据，否则回退到 Global
+                let bound_cred = state
+                    .sticky_tracker
+                    .as_ref()
+                    .and_then(|tracker| tracker.get_bound_credential(&identity.api_key));
+                if let Some(credential_id) = bound_cred {
+                    handle_non_stream_request_fixed(
+                        provider,
+                        state.api_keys.clone(),
+                        &auth.key_id,
+                        &request_body,
+                        &payload.model,
+                        input_tokens,
+                        state.request_log.clone(),
+                        message_count,
+                        start,
+                        log_request_body,
+                        credential_id,
+                    )
+                    .await
+                } else {
+                    handle_non_stream_request(
+                        provider,
+                        state.api_keys.clone(),
+                        &auth.key_id,
+                        &request_body,
+                        &payload.model,
+                        input_tokens,
+                        state.request_log.clone(),
+                        message_count,
+                        start,
+                        log_request_body,
+                    )
+                    .await
+                }
+            }
+        }
+        RouteDecision::Global => {
+            if payload.stream {
+                // 原有模式：缓冲流式响应
+                handle_stream_request_buffered(
+                    provider,
+                    state.api_keys.clone(),
+                    auth.key_id.clone(),
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    thinking_enabled,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                )
+                .await
+            } else {
+                // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
+                handle_non_stream_request(
+                    provider,
+                    state.api_keys.clone(),
+                    &auth.key_id,
+                    &request_body,
+                    &payload.model,
+                    input_tokens,
+                    state.request_log.clone(),
+                    message_count,
+                    start,
+                    log_request_body,
+                )
+                .await
+            }
+        }
     }
 }
 

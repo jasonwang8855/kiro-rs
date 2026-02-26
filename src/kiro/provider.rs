@@ -455,6 +455,26 @@ impl KiroProvider {
         self.call_api_with_retry(request_body, true).await
     }
 
+    /// 用指定凭据发送流式 API 请求（fixed 路由）
+    pub async fn call_api_stream_fixed(
+        &self,
+        request_body: &str,
+        credential_id: u64,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_fixed_inner(request_body, credential_id, true)
+            .await
+    }
+
+    /// 用指定凭据发送非流式 API 请求（fixed 路由）
+    pub async fn call_api_fixed(
+        &self,
+        request_body: &str,
+        credential_id: u64,
+    ) -> anyhow::Result<reqwest::Response> {
+        self.call_api_fixed_inner(request_body, credential_id, false)
+            .await
+    }
+
     /// 发送 MCP API 请求
     ///
     /// 用于 WebSearch 等工具调用
@@ -466,6 +486,157 @@ impl KiroProvider {
     /// 返回原始的 HTTP Response
     pub async fn call_mcp(&self, request_body: &str) -> anyhow::Result<reqwest::Response> {
         self.call_mcp_with_retry(request_body).await
+    }
+
+    /// 用指定凭据发送 MCP 请求（fixed 路由）
+    pub async fn call_mcp_fixed(
+        &self,
+        request_body: &str,
+        credential_id: u64,
+    ) -> anyhow::Result<reqwest::Response> {
+        let model = Self::extract_model_from_request(request_body);
+        let ctx = self
+            .token_manager
+            .acquire_context_for(credential_id, model.as_deref())
+            .await?;
+
+        let url = self.mcp_url_for(&ctx.credentials);
+        let headers = self.build_mcp_headers(&ctx)?;
+
+        let response = self
+            .client_for(&ctx.credentials)?
+            .post(&url)
+            .headers(headers)
+            .body(request_body.to_string())
+            .timeout(Duration::from_secs(720))
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status.is_success() {
+            self.token_manager.report_success(ctx.id);
+            return Ok(response);
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("Fixed MCP 请求失败: {} {}", status, body)
+    }
+
+    /// 内部方法：fixed 路由 API 调用（不做凭据切换）
+    async fn call_api_fixed_inner(
+        &self,
+        request_body: &str,
+        credential_id: u64,
+        stream: bool,
+    ) -> anyhow::Result<reqwest::Response> {
+        let model = Self::extract_model_from_request(request_body);
+        let mut last_error: Option<anyhow::Error> = None;
+        let api_type = if stream { "流式" } else { "非流式" };
+
+        for attempt in 0..MAX_RETRIES_PER_CREDENTIAL {
+            let ctx = self
+                .token_manager
+                .acquire_context_for(credential_id, model.as_deref())
+                .await?;
+            let url = self.base_url_for(&ctx.credentials);
+            let headers = self.build_headers(&ctx)?;
+
+            let response = match self
+                .client_for(&ctx.credentials)?
+                .post(&url)
+                .headers(headers)
+                .body(request_body.to_string())
+                .timeout(Duration::from_secs(720))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        "Fixed {} API 请求网络错误（尝试 {}/{}）: {}",
+                        api_type,
+                        attempt + 1,
+                        MAX_RETRIES_PER_CREDENTIAL,
+                        e
+                    );
+                    last_error = Some(e.into());
+                    if attempt + 1 < MAX_RETRIES_PER_CREDENTIAL {
+                        sleep(Self::retry_delay(attempt)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                self.token_manager.report_success(ctx.id);
+                return Ok(response);
+            }
+
+            let body = response.text().await.unwrap_or_default();
+
+            if status.as_u16() == 402 {
+                if Self::is_monthly_request_limit(&body) {
+                    self.token_manager.report_quota_exhausted(credential_id);
+                }
+                return Err(anyhow::anyhow!("Fixed {} API 额度错误 (402): {}", api_type, body));
+            }
+
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                return Err(anyhow::anyhow!("Fixed {} API 请求失败 (400): {}", api_type, body));
+            }
+
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                self.token_manager.report_failure(credential_id);
+                return Err(anyhow::anyhow!(
+                    "Fixed {} API 凭据错误 ({}): {}",
+                    api_type,
+                    status.as_u16(),
+                    body
+                ));
+            }
+
+            if matches!(
+                status,
+                reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+            ) || status.is_server_error()
+            {
+                tracing::warn!(
+                    "Fixed {} API 请求失败（尝试 {}/{}）: {} {}",
+                    api_type,
+                    attempt + 1,
+                    MAX_RETRIES_PER_CREDENTIAL,
+                    status,
+                    body
+                );
+                last_error = Some(anyhow::anyhow!(
+                    "Fixed {} API 请求失败: {} {}",
+                    api_type,
+                    status,
+                    body
+                ));
+                if attempt + 1 < MAX_RETRIES_PER_CREDENTIAL {
+                    sleep(Self::retry_delay(attempt)).await;
+                }
+                continue;
+            }
+
+            return Err(anyhow::anyhow!(
+                "Fixed {} API 请求失败: {} {}",
+                api_type,
+                status,
+                body
+            ));
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "Fixed {} API 请求失败：已达到最大重试次数",
+                if stream { "流式" } else { "非流式" }
+            )
+        }))
     }
 
     /// 内部方法：带重试逻辑的 MCP API 调用
