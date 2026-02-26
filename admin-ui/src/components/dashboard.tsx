@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import {
   Dialog,
@@ -29,6 +30,7 @@ import {
   useCreateApiKey,
   useCredentials,
   useDeleteApiKey,
+  useSetApiKeyRouting,
   useSetApiKeyDisabled,
   useTotalBalance,
   useLoadBalancingMode,
@@ -40,7 +42,13 @@ import {
 import { useScrambleText } from '@/hooks/use-scramble-text'
 import { extractErrorMessage, copyToClipboard, cn } from '@/lib/utils'
 import { exportCredentials, getCredentialBalance } from '@/api/credentials'
-import type { BalanceResponse, LoadBalancingMode, CredentialSnapshot } from '@/types/api'
+import type {
+  ApiKeyItem,
+  BalanceResponse,
+  CredentialSnapshot,
+  LoadBalancingMode,
+  RoutingMode,
+} from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
@@ -69,7 +77,12 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [kamImportDialogOpen, setKamImportDialogOpen] = useState(false)
   const [oauthDialogOpen, setOauthDialogOpen] = useState(false)
   const [newApiKeyName, setNewApiKeyName] = useState('')
+  const [newApiKeyRoutingMode, setNewApiKeyRoutingMode] = useState<RoutingMode>('auto')
+  const [newApiKeyCredentialId, setNewApiKeyCredentialId] = useState<number | null>(null)
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
+  const [routingEditKey, setRoutingEditKey] = useState<ApiKeyItem | null>(null)
+  const [editRoutingMode, setEditRoutingMode] = useState<RoutingMode>('auto')
+  const [editCredentialId, setEditCredentialId] = useState<number | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [batchValidating, setBatchValidating] = useState(false)
   const [streamsExpanded, setStreamsExpanded] = useState(false)
@@ -88,6 +101,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const { data: stickyStatsData, isError: stickyStatsError } = useStickyStats(isSticky)
   const stickyFetchError = stickyStatusError || stickyStatsError
   const { mutate: createApiKey, isPending: creatingApiKey } = useCreateApiKey()
+  const { mutate: setApiKeyRouting, isPending: settingApiKeyRouting } = useSetApiKeyRouting()
   const { mutate: setApiKeyDisabled } = useSetApiKeyDisabled()
   const { mutate: deleteApiKey } = useDeleteApiKey()
   const totalCredentialsDisplay = useScrambleText(String(data?.total || 0), !isLoading)
@@ -113,6 +127,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
     () => [...(apiKeysData?.keys || [])].sort((a, b) => Number(b.enabled) - Number(a.enabled)),
     [apiKeysData?.keys]
   )
+  const availableCredentials = useMemo(() => data?.credentials || [], [data?.credentials])
 
   const handleLogout = () => {
     storage.removeToken()
@@ -131,16 +146,57 @@ export function Dashboard({ onLogout }: DashboardProps) {
       toast.error('请输入 API 密钥名称')
       return
     }
+    if (newApiKeyRoutingMode === 'fixed' && newApiKeyCredentialId === null) {
+      toast.error('固定路由模式必须选择绑定凭据')
+      return
+    }
 
     createApiKey(
-      { name },
+      {
+        name,
+        routingMode: newApiKeyRoutingMode,
+        credentialId: newApiKeyRoutingMode === 'fixed' ? newApiKeyCredentialId ?? undefined : undefined,
+      },
       {
         onSuccess: (res) => {
           setNewApiKeyName('')
+          setNewApiKeyRoutingMode('auto')
+          setNewApiKeyCredentialId(null)
           toast.success(`创建成功，明文只显示一次：${res.key}`)
         },
         onError: (err) => {
           toast.error(`创建失败: ${extractErrorMessage(err)}`)
+        },
+      }
+    )
+  }
+
+  const openRoutingDialog = (item: ApiKeyItem) => {
+    setRoutingEditKey(item)
+    setEditRoutingMode(item.routingMode)
+    setEditCredentialId(item.credentialId)
+  }
+
+  const handleUpdateApiKeyRouting = () => {
+    if (!routingEditKey) return
+    if (editRoutingMode === 'fixed' && editCredentialId === null) {
+      toast.error('固定路由模式必须选择绑定凭据')
+      return
+    }
+
+    setApiKeyRouting(
+      {
+        id: routingEditKey.id,
+        routingMode: editRoutingMode,
+        credentialId: editRoutingMode === 'fixed' ? editCredentialId ?? undefined : undefined,
+      },
+      {
+        onSuccess: () => {
+          toast.success('路由设置已更新')
+          setRoutingEditKey(null)
+        },
+        onError: (err) => {
+          toast.error(`更新失败: ${extractErrorMessage(err)}`)
         },
       }
     )
@@ -517,17 +573,46 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 placeholder="新 API 密钥名称"
                 className="font-mono max-w-md"
               />
+              <Select
+                value={newApiKeyRoutingMode}
+                onChange={(e) => {
+                  const mode = e.target.value as RoutingMode
+                  setNewApiKeyRoutingMode(mode)
+                  if (mode === 'auto') {
+                    setNewApiKeyCredentialId(null)
+                  }
+                }}
+                className="w-full sm:w-40"
+              >
+                <option value="auto">自动</option>
+                <option value="fixed">固定</option>
+              </Select>
+              {newApiKeyRoutingMode === 'fixed' && (
+                <Select
+                  value={newApiKeyCredentialId !== null ? String(newApiKeyCredentialId) : ''}
+                  onChange={(e) => setNewApiKeyCredentialId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full sm:w-44"
+                >
+                  <option value="">选择凭据</option>
+                  {availableCredentials.map((cred) => (
+                    <option key={cred.id} value={cred.id}>
+                      #{cred.id} (P{cred.priority})
+                    </option>
+                  ))}
+                </Select>
+              )}
               <Button onClick={handleCreateApiKey} disabled={creatingApiKey} className="sm:w-auto">
                 创建
               </Button>
             </div>
 
             <div className="overflow-x-auto rounded-lg border border-white/10 bg-[#050505]">
-              <table className="w-full min-w-[860px] border-collapse">
+              <table className="w-full min-w-[980px] border-collapse">
                 <thead>
                   <tr className="border-b border-white/10">
                     <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">名称</th>
                     <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">密钥</th>
+                    <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">路由</th>
                     <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">统计</th>
                     <th className="px-3 py-2 text-left font-sans text-xs font-medium tracking-wide text-neutral-500">状态</th>
                     <th className="px-3 py-2 text-right font-sans text-xs font-medium tracking-wide text-neutral-500">操作</th>
@@ -536,7 +621,7 @@ export function Dashboard({ onLogout }: DashboardProps) {
                 <tbody>
                   {sortedApiKeys.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-3 py-8 text-center font-sans text-sm font-medium text-neutral-500">
+                      <td colSpan={6} className="px-3 py-8 text-center font-sans text-sm font-medium text-neutral-500">
                         暂无 API 密钥
                       </td>
                     </tr>
@@ -545,6 +630,18 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     <tr key={item.id} className="border-b border-white/5 font-mono text-sm text-white">
                       <td className="px-3 py-3 font-sans font-medium text-neutral-200">{item.name}</td>
                       <td className="max-w-[420px] break-all px-3 py-3 text-neutral-400">{item.key || item.keyPreview}</td>
+                      <td className="px-3 py-3">
+                        {item.routingMode === 'fixed' ? (
+                          <div className="flex items-center gap-2">
+                            <Badge className="border-sky-500/30 bg-sky-500/15 text-sky-300">固定</Badge>
+                            <span className="font-sans text-xs text-sky-200/90">
+                              #{item.credentialId ?? '-'}
+                            </span>
+                          </div>
+                        ) : (
+                          <Badge variant="secondary">自动</Badge>
+                        )}
+                      </td>
                       <td className="px-3 py-3 text-neutral-400 font-sans text-xs">
                         请求 <span className="font-mono text-white text-sm">{item.requestCount}</span> <span className="text-neutral-700">|</span> 输入 <span className="font-mono text-white text-sm">{item.inputTokens}</span> <span className="text-neutral-700">|</span> 输出 <span className="font-mono text-white text-sm">{item.outputTokens}</span>
                       </td>
@@ -560,7 +657,14 @@ export function Dashboard({ onLogout }: DashboardProps) {
                         />
                       </td>
                       <td className="px-3 py-3">
-                        <div className="flex justify-end gap-2">
+                        <div className="flex justify-end gap-2 flex-wrap">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => openRoutingDialog(item)}
+                          >
+                            路由设置
+                          </Button>
                           <Button
                             size="sm"
                             variant="secondary"
@@ -608,6 +712,60 @@ export function Dashboard({ onLogout }: DashboardProps) {
           queryClient.invalidateQueries({ queryKey: ['credentials'] })
         }}
       />
+
+      <Dialog open={routingEditKey !== null} onOpenChange={(open) => !open && setRoutingEditKey(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>路由设置</DialogTitle>
+            <DialogDescription>
+              {routingEditKey ? `为「${routingEditKey.name}」设置路由模式` : '设置路由模式'}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <div className="text-xs font-sans text-neutral-500">路由模式</div>
+              <Select
+                value={editRoutingMode}
+                onChange={(e) => {
+                  const mode = e.target.value as RoutingMode
+                  setEditRoutingMode(mode)
+                  if (mode === 'auto') {
+                    setEditCredentialId(null)
+                  }
+                }}
+              >
+                <option value="auto">自动</option>
+                <option value="fixed">固定</option>
+              </Select>
+            </div>
+
+            {editRoutingMode === 'fixed' && (
+              <div className="space-y-1.5">
+                <div className="text-xs font-sans text-neutral-500">绑定凭据</div>
+                <Select
+                  value={editCredentialId !== null ? String(editCredentialId) : ''}
+                  onChange={(e) => setEditCredentialId(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">选择凭据</option>
+                  {availableCredentials.map((cred) => (
+                    <option key={cred.id} value={cred.id}>
+                      #{cred.id} (P{cred.priority}) {cred.email ? `- ${cred.email}` : ''}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setRoutingEditKey(null)}>
+              取消
+            </Button>
+            <Button onClick={handleUpdateApiKeyRouting} disabled={settingApiKeyRouting}>
+              保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={deleteKeyId !== null} onOpenChange={(open) => !open && setDeleteKeyId(null)}>
         <DialogContent className="sm:max-w-md">

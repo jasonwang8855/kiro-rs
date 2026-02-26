@@ -13,10 +13,12 @@ import type {
   ApiKeyListResponse,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
+  SetApiKeyRoutingRequest,
   ApiStatsResponse,
   TotalBalanceResponse,
   RequestLogResponse,
   LoadBalancingMode,
+  RoutingMode,
   StickyStatusResponse,
   StickyStreamsResponse,
   StickyStatsResponse,
@@ -110,6 +112,19 @@ export async function listApiKeys(): Promise<ApiKeyListResponse> {
 
 export async function createApiKey(req: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
   const { data } = await api.post<CreateApiKeyResponse>('/apikeys', req)
+  return data
+}
+
+export async function setApiKeyRouting(
+  id: string,
+  routingMode: RoutingMode,
+  credentialId?: number
+): Promise<SuccessResponse> {
+  const payload: SetApiKeyRoutingRequest = {
+    routingMode,
+    credentialId,
+  }
+  const { data } = await api.put<SuccessResponse>(`/apikeys/${id}/routing`, payload)
   return data
 }
 

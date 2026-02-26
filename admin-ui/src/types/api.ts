@@ -98,14 +98,20 @@ export interface ApiKeyItem {
   inputTokens: number
   outputTokens: number
   keyPreview: string
+  routingMode: RoutingMode
+  credentialId: number | null
 }
 
 export interface ApiKeyListResponse {
   keys: ApiKeyItem[]
 }
 
+export type RoutingMode = 'auto' | 'fixed'
+
 export interface CreateApiKeyRequest {
   name: string
+  routingMode?: RoutingMode
+  credentialId?: number
 }
 
 export interface CreateApiKeyResponse {
@@ -114,6 +120,13 @@ export interface CreateApiKeyResponse {
   name: string
   key: string
   keyPreview: string
+  routingMode: RoutingMode
+  credentialId: number | null
+}
+
+export interface SetApiKeyRoutingRequest {
+  routingMode: RoutingMode
+  credentialId?: number
 }
 
 export interface ApiUsageOverview {

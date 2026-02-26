@@ -11,6 +11,7 @@ import {
   setLoadBalancingMode,
   listApiKeys,
   createApiKey,
+  setApiKeyRouting,
   setApiKeyDisabled,
   deleteApiKey,
   getApiStats,
@@ -19,7 +20,12 @@ import {
   getStickyStreams,
   getStickyStats,
 } from '@/api/credentials'
-import type { AddCredentialRequest, CreateApiKeyRequest, LoadBalancingMode } from '@/types/api'
+import type {
+  AddCredentialRequest,
+  CreateApiKeyRequest,
+  LoadBalancingMode,
+  RoutingMode,
+} from '@/types/api'
 
 export function useCredentials() {
   return useQuery({
@@ -173,6 +179,25 @@ export function useSetApiKeyDisabled() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) => setApiKeyDisabled(id, disabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
+      queryClient.invalidateQueries({ queryKey: ['apiStats'] })
+    },
+  })
+}
+
+export function useSetApiKeyRouting() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      id,
+      routingMode,
+      credentialId,
+    }: {
+      id: string
+      routingMode: RoutingMode
+      credentialId?: number
+    }) => setApiKeyRouting(id, routingMode, credentialId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['apiKeys'] })
       queryClient.invalidateQueries({ queryKey: ['apiStats'] })
