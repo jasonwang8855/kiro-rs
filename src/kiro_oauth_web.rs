@@ -354,7 +354,7 @@ async fn check_status(
                         priority: 0,
                         region: Some(next.region.clone()),
                         auth_region: Some(next.region.clone()),
-                        api_region: None,
+                        api_region: Some(next.region.clone()),
                         machine_id: None,
                         email: None,
                         proxy_url: None,
