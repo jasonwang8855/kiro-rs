@@ -7,7 +7,9 @@ use crate::apikeys::AuthenticatedApiKey;
 use crate::kiro::model::events::Event;
 use crate::kiro::model::requests::kiro::KiroRequest;
 use crate::kiro::parser::decoder::EventStreamDecoder;
+use crate::kiro::provider::StickyError;
 use crate::request_log::{RequestLog, RequestLogEntry};
+use crate::sticky::{RequestIdentity, StreamGuard};
 use crate::token;
 use anyhow::Error;
 use axum::{
@@ -71,6 +73,33 @@ fn map_provider_error(err: Error) -> Response {
         )),
     )
         .into_response()
+}
+
+/// 将 StickyError 映射为 HTTP 响应
+fn map_sticky_error(err: StickyError) -> Response {
+    match err {
+        StickyError::AllFull { retry_after_secs } => {
+            let retry_after = format!("{}", retry_after_secs.ceil() as u64);
+            Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("Retry-After", retry_after)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&ErrorResponse::new(
+                        "overloaded_error",
+                        "All credentials at capacity. Please retry later.",
+                    ))
+                    .unwrap(),
+                ))
+                .unwrap()
+        }
+        StickyError::NoTracker => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new("internal_error", "Sticky tracker not configured")),
+        )
+            .into_response(),
+        StickyError::ApiError(e) => map_provider_error(e),
+    }
 }
 
 /// GET /v1/models
@@ -295,21 +324,74 @@ pub async fn post_messages(
         .unwrap_or(false);
 
     if payload.stream {
-        // 流式响应
-        handle_stream_request(
-            provider,
-            state.api_keys.clone(),
-            auth.key_id.clone(),
-            &request_body,
-            &payload.model,
-            input_tokens,
-            thinking_enabled,
-            state.request_log.clone(),
-            message_count,
-            start,
-            log_request_body,
-        )
-        .await
+        // 构建请求身份
+        let identity = RequestIdentity {
+            api_key: auth.key_id.clone(),
+            session_id: payload
+                .metadata
+                .as_ref()
+                .and_then(|m| m.user_id.clone()),
+        };
+
+        // 检查是否使用 sticky 模式
+        let is_sticky = state.sticky_tracker.is_some()
+            && provider
+                .token_manager()
+                .get_load_balancing_mode()
+                == "sticky";
+
+        if is_sticky {
+            // Sticky 模式：通过 StickyTracker 选择凭据
+            let (response, guard) = match provider
+                .call_api_stream_sticky(&request_body, &identity)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return map_sticky_error(e),
+            };
+
+            let mut ctx =
+                StreamContext::new_with_thinking(&payload.model, input_tokens, thinking_enabled);
+            let initial_events = ctx.generate_initial_events();
+
+            let stream = create_sse_stream_with_guard(
+                response,
+                ctx,
+                initial_events,
+                state.api_keys.clone(),
+                auth.key_id.clone(),
+                state.request_log.clone(),
+                payload.model.to_string(),
+                message_count,
+                start,
+                log_request_body,
+                guard,
+            );
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::CONNECTION, "keep-alive")
+                .body(Body::from_stream(stream))
+                .unwrap()
+        } else {
+            // 原有模式
+            handle_stream_request(
+                provider,
+                state.api_keys.clone(),
+                auth.key_id.clone(),
+                &request_body,
+                &payload.model,
+                input_tokens,
+                thinking_enabled,
+                state.request_log.clone(),
+                message_count,
+                start,
+                log_request_body,
+            )
+            .await
+        }
     } else {
         // 非流式响应
         handle_non_stream_request(
@@ -516,6 +598,100 @@ fn create_sse_stream(
                     tracing::trace!("发送 ping 保活事件");
                     let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
                     Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx)))
+                }
+            }
+        },
+    )
+    .flatten();
+
+    initial_stream.chain(processing_stream)
+}
+
+/// 创建带 StreamGuard 的 SSE 事件流（sticky 模式用）
+fn create_sse_stream_with_guard(
+    response: reqwest::Response,
+    ctx: StreamContext,
+    initial_events: Vec<SseEvent>,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    model: String,
+    message_count: usize,
+    start: Instant,
+    log_request_body: String,
+    mut guard: StreamGuard,
+) -> impl Stream<Item = Result<Bytes, Infallible>> {
+    // 激活流（上游已成功响应）
+    guard.activate();
+
+    let initial_stream = stream::iter(events_to_text_bytes(initial_events));
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
+    let body_stream = response.bytes_stream();
+
+    let processing_stream = stream::unfold(
+        (body_stream, ctx, EventStreamDecoder::new(), false, interval(Duration::from_secs(PING_INTERVAL_SECS)), api_keys, key_id, false, log_ctx, guard),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, usage_recorded, mut log_ctx, guard)| async move {
+            if finished {
+                return None;
+            }
+
+            tokio::select! {
+                chunk_result = body_stream.next() => {
+                    match chunk_result {
+                        Some(Ok(chunk)) => {
+                            guard.touch();
+                            if let Err(e) = decoder.feed(&chunk) {
+                                tracing::warn!("缓冲区溢出: {}", e);
+                            }
+                            let mut events = Vec::new();
+                            for result in decoder.decode_iter() {
+                                match result {
+                                    Ok(frame) => {
+                                        if let Ok(event) = Event::from_frame(frame) {
+                                            let sse_events = ctx.process_kiro_event(&event);
+                                            for se in &sse_events {
+                                                log_ctx.response_events.push(json!({
+                                                    "event": se.event,
+                                                    "data": se.data,
+                                                }));
+                                            }
+                                            events.extend(sse_events);
+                                        }
+                                    }
+                                    Err(e) => { tracing::warn!("解码事件失败: {}", e); }
+                                }
+                            }
+                            let bytes = events_to_text_bytes(events);
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx, guard)))
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!("读取响应流失败: {}", e);
+                            if !usage_recorded {
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
+                            }
+                            let final_events = ctx.generate_final_events();
+                            let bytes = events_to_text_bytes(final_events);
+                            // guard will be dropped here, deactivating the stream
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx, guard)))
+                        }
+                        None => {
+                            if !usage_recorded {
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                log_ctx.record(input, output, ctx.token_source(), "success");
+                            }
+                            let final_events = ctx.generate_final_events();
+                            let bytes = events_to_text_bytes(final_events);
+                            Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx, guard)))
+                        }
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    tracing::trace!("发送 ping 保活事件");
+                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                    Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx, guard)))
                 }
             }
         },
@@ -906,21 +1082,70 @@ pub async fn post_messages_cc(
         .unwrap_or(false);
 
     if payload.stream {
-        // 流式响应（缓冲模式）
-        handle_stream_request_buffered(
-            provider,
-            state.api_keys.clone(),
-            auth.key_id.clone(),
-            &request_body,
-            &payload.model,
-            input_tokens,
-            thinking_enabled,
-            state.request_log.clone(),
-            message_count,
-            start,
-            log_request_body,
-        )
-        .await
+        // 构建请求身份
+        let identity = RequestIdentity {
+            api_key: auth.key_id.clone(),
+            session_id: payload
+                .metadata
+                .as_ref()
+                .and_then(|m| m.user_id.clone()),
+        };
+
+        // 检查是否使用 sticky 模式
+        let is_sticky = state.sticky_tracker.is_some()
+            && provider
+                .token_manager()
+                .get_load_balancing_mode()
+                == "sticky";
+
+        if is_sticky {
+            // Sticky 模式：通过 StickyTracker 选择凭据
+            let (response, guard) = match provider
+                .call_api_stream_sticky(&request_body, &identity)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return map_sticky_error(e),
+            };
+
+            let ctx = BufferedStreamContext::new(&payload.model, input_tokens, thinking_enabled);
+            let stream = create_buffered_sse_stream_with_guard(
+                response,
+                ctx,
+                state.api_keys.clone(),
+                auth.key_id.clone(),
+                state.request_log.clone(),
+                payload.model.to_string(),
+                message_count,
+                start,
+                log_request_body,
+                guard,
+            );
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .header(header::CONNECTION, "keep-alive")
+                .body(Body::from_stream(stream))
+                .unwrap()
+        } else {
+            // 原有模式：缓冲流式响应
+            handle_stream_request_buffered(
+                provider,
+                state.api_keys.clone(),
+                auth.key_id.clone(),
+                &request_body,
+                &payload.model,
+                input_tokens,
+                thinking_enabled,
+                state.request_log.clone(),
+                message_count,
+                start,
+                log_request_body,
+            )
+            .await
+        }
     } else {
         // 非流式响应（复用现有逻辑，已经使用正确的 input_tokens）
         handle_non_stream_request(
@@ -1081,6 +1306,107 @@ fn create_buffered_sse_stream(
                                 log_ctx.record(input, output, ctx.token_source(), "success");
                                 let bytes = events_to_text_bytes(all_events);
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx)));
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .flatten()
+}
+
+/// 创建带 StreamGuard 的缓冲 SSE 事件流（sticky 模式用）
+fn create_buffered_sse_stream_with_guard(
+    response: reqwest::Response,
+    ctx: BufferedStreamContext,
+    api_keys: std::sync::Arc<crate::apikeys::ApiKeyManager>,
+    key_id: String,
+    request_log: Option<std::sync::Arc<RequestLog>>,
+    model: String,
+    message_count: usize,
+    start: Instant,
+    log_request_body: String,
+    mut guard: StreamGuard,
+) -> impl Stream<Item = Result<Bytes, Infallible>> {
+    guard.activate();
+
+    let body_stream = response.bytes_stream();
+    let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
+
+    stream::unfold(
+        (
+            body_stream,
+            ctx,
+            EventStreamDecoder::new(),
+            false,
+            interval(Duration::from_secs(PING_INTERVAL_SECS)),
+            api_keys,
+            key_id,
+            log_ctx,
+            guard,
+        ),
+        |(mut body_stream, mut ctx, mut decoder, finished, mut ping_interval, api_keys, key_id, mut log_ctx, guard)| async move {
+            if finished {
+                return None;
+            }
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = ping_interval.tick() => {
+                        tracing::trace!("发送 ping 保活事件（缓冲模式）");
+                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                        return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, log_ctx, guard)));
+                    }
+
+                    chunk_result = body_stream.next() => {
+                        match chunk_result {
+                            Some(Ok(chunk)) => {
+                                guard.touch();
+                                if let Err(e) = decoder.feed(&chunk) {
+                                    tracing::warn!("缓冲区溢出: {}", e);
+                                }
+                                for result in decoder.decode_iter() {
+                                    match result {
+                                        Ok(frame) => {
+                                            if let Ok(event) = Event::from_frame(frame) {
+                                                ctx.process_and_buffer(&event);
+                                            }
+                                        }
+                                        Err(e) => { tracing::warn!("解码事件失败: {}", e); }
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => {
+                                tracing::error!("读取响应流失败: {}", e);
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                let all_events = ctx.finish_and_get_all_events();
+                                for se in &all_events {
+                                    log_ctx.response_events.push(json!({
+                                        "event": se.event,
+                                        "data": se.data,
+                                    }));
+                                }
+                                log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
+                                let bytes = events_to_text_bytes(all_events);
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx, guard)));
+                            }
+                            None => {
+                                let (input, output) = ctx.final_usage();
+                                api_keys.record_usage(&key_id, input.max(0) as u64, output.max(0) as u64);
+                                let all_events = ctx.finish_and_get_all_events();
+                                for se in &all_events {
+                                    log_ctx.response_events.push(json!({
+                                        "event": se.event,
+                                        "data": se.data,
+                                    }));
+                                }
+                                log_ctx.record(input, output, ctx.token_source(), "success");
+                                let bytes = events_to_text_bytes(all_events);
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx, guard)));
                             }
                         }
                     }

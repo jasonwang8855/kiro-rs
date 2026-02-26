@@ -96,6 +96,18 @@ pub struct Config {
     #[serde(default = "default_load_balancing_mode")]
     pub load_balancing_mode: String,
 
+    #[serde(default = "default_max_concurrent_per_credential")]
+    pub max_concurrent_per_credential: u32,
+
+    #[serde(default = "default_max_concurrent_per_key")]
+    pub max_concurrent_per_key: u32,
+
+    #[serde(default = "default_sticky_expiry_minutes")]
+    pub sticky_expiry_minutes: u32,
+
+    #[serde(default = "default_zombie_stream_timeout_minutes")]
+    pub zombie_stream_timeout_minutes: u32,
+
     /// 閰嶇疆鏂囦欢璺緞锛堣繍琛屾椂鍏冩暟鎹紝涓嶅啓鍏?JSON锛?
     #[serde(skip)]
     config_path: Option<PathBuf>,
@@ -138,6 +150,22 @@ fn default_load_balancing_mode() -> String {
     "priority".to_string()
 }
 
+fn default_max_concurrent_per_credential() -> u32 {
+    2
+}
+
+fn default_max_concurrent_per_key() -> u32 {
+    5
+}
+
+fn default_sticky_expiry_minutes() -> u32 {
+    30
+}
+
+fn default_zombie_stream_timeout_minutes() -> u32 {
+    15
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -162,6 +190,10 @@ impl Default for Config {
             admin_username: None,
             admin_password: None,
             load_balancing_mode: default_load_balancing_mode(),
+            max_concurrent_per_credential: default_max_concurrent_per_credential(),
+            max_concurrent_per_key: default_max_concurrent_per_key(),
+            sticky_expiry_minutes: default_sticky_expiry_minutes(),
+            zombie_stream_timeout_minutes: default_zombie_stream_timeout_minutes(),
             config_path: None,
         }
     }

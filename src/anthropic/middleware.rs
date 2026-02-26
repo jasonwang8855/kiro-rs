@@ -14,6 +14,7 @@ use crate::apikeys::{ApiKeyManager, AuthenticatedApiKey};
 use crate::common::auth;
 use crate::kiro::provider::KiroProvider;
 use crate::request_log::RequestLog;
+use crate::sticky::StickyTracker;
 
 use super::types::ErrorResponse;
 
@@ -23,6 +24,7 @@ pub struct AppState {
     pub kiro_provider: Option<Arc<KiroProvider>>,
     pub profile_arn: Option<String>,
     pub request_log: Option<Arc<RequestLog>>,
+    pub sticky_tracker: Option<Arc<StickyTracker>>,
 }
 
 impl AppState {
@@ -32,6 +34,7 @@ impl AppState {
             kiro_provider: None,
             profile_arn: None,
             request_log: None,
+            sticky_tracker: None,
         }
     }
 
@@ -47,6 +50,11 @@ impl AppState {
 
     pub fn with_request_log(mut self, log: Arc<RequestLog>) -> Self {
         self.request_log = Some(log);
+        self
+    }
+
+    pub fn with_sticky_tracker(mut self, tracker: Arc<StickyTracker>) -> Self {
+        self.sticky_tracker = Some(tracker);
         self
     }
 }

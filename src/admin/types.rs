@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::request_log::RequestLogEntry;
+use crate::sticky::{CredentialSnapshot, StickyStats, StreamSnapshot};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +36,8 @@ pub struct CredentialStatusItem {
     pub has_proxy: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_streams: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,4 +227,25 @@ impl AdminErrorResponse {
     pub fn internal_error(message: impl Into<String>) -> Self {
         Self::new("internal_error", message)
     }
+}
+
+// ============ Sticky Load Balancing ============
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickyStatusResponse {
+    pub credentials: Vec<CredentialSnapshot>,
+    pub active_stream_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickyStreamsResponse {
+    pub streams: Vec<StreamSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StickyStatsResponse {
+    pub stats: StickyStats,
 }

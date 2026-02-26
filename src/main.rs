@@ -7,6 +7,7 @@ mod http_client;
 mod kiro;
 mod kiro_oauth_web;
 mod model;
+mod sticky;
 pub mod request_log;
 pub mod token;
 
@@ -84,7 +85,44 @@ async fn main() {
         std::process::exit(1);
     });
     let token_manager = Arc::new(token_manager);
-    let kiro_provider = KiroProvider::with_proxy(token_manager.clone(), proxy_config.clone());
+    let mut kiro_provider = KiroProvider::with_proxy(token_manager.clone(), proxy_config.clone());
+
+    // 始终创建 StickyTracker（支持运行时切换到 sticky 模式）
+    let sticky_tracker = Arc::new(sticky::StickyTracker::new(
+        config.max_concurrent_per_credential,
+        config.max_concurrent_per_key,
+        config.sticky_expiry_minutes,
+        config.zombie_stream_timeout_minutes,
+    ));
+    kiro_provider = kiro_provider.with_sticky_tracker(sticky_tracker.clone());
+
+    // 后台清理任务（始终运行，非 sticky 模式下无数据不会有实际开销）
+    let cleanup_tracker = sticky_tracker.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let zombies = cleanup_tracker.cleanup_zombies();
+            let expired = cleanup_tracker.cleanup_expired_bindings();
+            if zombies > 0 || expired > 0 {
+                tracing::info!(
+                    "Sticky 清理: 移除 {} 个僵尸流, {} 个过期绑定",
+                    zombies,
+                    expired
+                );
+            }
+        }
+    });
+
+    if config.load_balancing_mode == "sticky" {
+        tracing::info!(
+            "Sticky 负载均衡已启用 (max_per_credential={}, max_per_key={}, expiry={}min, zombie={}min)",
+            config.max_concurrent_per_credential,
+            config.max_concurrent_per_key,
+            config.sticky_expiry_minutes,
+            config.zombie_stream_timeout_minutes,
+        );
+    }
 
     token::init_config(token::CountTokensConfig {
         api_url: config.count_tokens_api_url.clone(),
@@ -99,6 +137,7 @@ async fn main() {
         Some(kiro_provider),
         first_credentials.profile_arn.clone(),
         Some(request_log.clone()),
+        Some(sticky_tracker.clone()),
     );
 
     let admin_enabled = config
@@ -113,7 +152,8 @@ async fn main() {
             .unwrap_or(false);
 
     let app = if admin_enabled {
-        let admin_service = admin::AdminService::new(token_manager.clone(), api_keys.clone(), Some(request_log.clone()));
+        let mut admin_service = admin::AdminService::new(token_manager.clone(), api_keys.clone(), Some(request_log.clone()));
+        admin_service = admin_service.with_sticky_tracker(sticky_tracker.clone());
 
         let admin_username = config
             .admin_username

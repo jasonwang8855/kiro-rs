@@ -12,12 +12,13 @@ use crate::apikeys::{ApiKeyManager, ApiKeyPublicInfo, ApiKeyUsageOverview};
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::request_log::{RequestLog, RequestLogEntry};
+use crate::sticky::StickyTracker;
 
 use super::error::AdminServiceError;
 use super::types::{
     AddCredentialRequest, AddCredentialResponse, BalanceResponse, CredentialStatusItem,
     CredentialsStatusResponse, LoadBalancingModeResponse, SetLoadBalancingModeRequest,
-    TotalBalanceResponse,
+    StickyStatsResponse, StickyStatusResponse, StickyStreamsResponse, TotalBalanceResponse,
 };
 
 /// 余额缓存过期时间（秒），5 分钟
@@ -41,6 +42,7 @@ pub struct AdminService {
     balance_cache: Mutex<HashMap<u64, CachedBalance>>,
     cache_path: Option<PathBuf>,
     request_log: Option<Arc<RequestLog>>,
+    sticky_tracker: Option<Arc<StickyTracker>>,
 }
 
 impl AdminService {
@@ -57,31 +59,53 @@ impl AdminService {
             balance_cache: Mutex::new(balance_cache),
             cache_path,
             request_log,
+            sticky_tracker: None,
         }
+    }
+
+    pub fn with_sticky_tracker(mut self, tracker: Arc<StickyTracker>) -> Self {
+        self.sticky_tracker = Some(tracker);
+        self
     }
 
     /// 获取所有凭据状态
     pub fn get_all_credentials(&self) -> CredentialsStatusResponse {
         let snapshot = self.token_manager.snapshot();
 
+        // 从 StickyTracker 获取每个 credential 的活跃流数
+        let active_counts: Option<HashMap<u64, u32>> = self.sticky_tracker.as_ref().map(|tracker| {
+            let sticky_snap = tracker.snapshot();
+            sticky_snap
+                .credentials
+                .into_iter()
+                .map(|c| (c.id, c.active_count))
+                .collect()
+        });
+
         let mut credentials: Vec<CredentialStatusItem> = snapshot
             .entries
             .into_iter()
-            .map(|entry| CredentialStatusItem {
-                id: entry.id,
-                priority: entry.priority,
-                disabled: entry.disabled,
-                failure_count: entry.failure_count,
-                is_current: entry.id == snapshot.current_id,
-                expires_at: entry.expires_at,
-                auth_method: entry.auth_method,
-                has_profile_arn: entry.has_profile_arn,
-                refresh_token_hash: entry.refresh_token_hash,
-                email: entry.email,
-                success_count: entry.success_count,
-                last_used_at: entry.last_used_at.clone(),
-                has_proxy: entry.has_proxy,
-                proxy_url: entry.proxy_url,
+            .map(|entry| {
+                let active_streams = active_counts
+                    .as_ref()
+                    .and_then(|m| m.get(&entry.id).copied());
+                CredentialStatusItem {
+                    id: entry.id,
+                    priority: entry.priority,
+                    disabled: entry.disabled,
+                    failure_count: entry.failure_count,
+                    is_current: entry.id == snapshot.current_id,
+                    expires_at: entry.expires_at,
+                    auth_method: entry.auth_method,
+                    has_profile_arn: entry.has_profile_arn,
+                    refresh_token_hash: entry.refresh_token_hash,
+                    email: entry.email,
+                    success_count: entry.success_count,
+                    last_used_at: entry.last_used_at.clone(),
+                    has_proxy: entry.has_proxy,
+                    proxy_url: entry.proxy_url,
+                    active_streams,
+                }
             })
             .collect();
 
@@ -359,9 +383,9 @@ impl AdminService {
         req: SetLoadBalancingModeRequest,
     ) -> Result<LoadBalancingModeResponse, AdminServiceError> {
         // 验证模式值
-        if req.mode != "priority" && req.mode != "balanced" {
+        if req.mode != "priority" && req.mode != "balanced" && req.mode != "sticky" {
             return Err(AdminServiceError::InvalidCredential(
-                "mode 必须是 'priority' 或 'balanced'".to_string(),
+                "mode 必须是 'priority'、'balanced' 或 'sticky'".to_string(),
             ));
         }
 
@@ -511,5 +535,31 @@ impl AdminService {
         } else {
             AdminServiceError::InternalError(msg)
         }
+    }
+
+    // ============ Sticky Load Balancing ============
+
+    pub fn get_sticky_status(&self) -> Option<StickyStatusResponse> {
+        let tracker = self.sticky_tracker.as_ref()?;
+        let snapshot = tracker.snapshot();
+        Some(StickyStatusResponse {
+            credentials: snapshot.credentials,
+            active_stream_count: snapshot.active_stream_count,
+        })
+    }
+
+    pub fn get_sticky_streams(&self) -> Option<StickyStreamsResponse> {
+        let tracker = self.sticky_tracker.as_ref()?;
+        Some(StickyStreamsResponse {
+            streams: tracker.stream_snapshots(),
+        })
+    }
+
+    pub fn get_sticky_stats(&self) -> Option<StickyStatsResponse> {
+        let tracker = self.sticky_tracker.as_ref()?;
+        let snapshot = tracker.snapshot();
+        Some(StickyStatsResponse {
+            stats: snapshot.stats,
+        })
     }
 }

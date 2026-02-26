@@ -16,6 +16,10 @@ import type {
   ApiStatsResponse,
   TotalBalanceResponse,
   RequestLogResponse,
+  LoadBalancingMode,
+  StickyStatusResponse,
+  StickyStreamsResponse,
+  StickyStatsResponse,
 } from '@/types/api'
 
 const api = axios.create({
@@ -89,13 +93,13 @@ export async function deleteCredential(id: number): Promise<SuccessResponse> {
   return data
 }
 
-export async function getLoadBalancingMode(): Promise<{ mode: 'priority' | 'balanced' }> {
-  const { data } = await api.get<{ mode: 'priority' | 'balanced' }>('/config/load-balancing')
+export async function getLoadBalancingMode(): Promise<{ mode: LoadBalancingMode }> {
+  const { data } = await api.get<{ mode: LoadBalancingMode }>('/config/load-balancing')
   return data
 }
 
-export async function setLoadBalancingMode(mode: 'priority' | 'balanced'): Promise<{ mode: 'priority' | 'balanced' }> {
-  const { data } = await api.put<{ mode: 'priority' | 'balanced' }>('/config/load-balancing', { mode })
+export async function setLoadBalancingMode(mode: LoadBalancingMode): Promise<{ mode: LoadBalancingMode }> {
+  const { data } = await api.put<{ mode: LoadBalancingMode }>('/config/load-balancing', { mode })
   return data
 }
 
@@ -152,4 +156,21 @@ export async function getLogEnabled(): Promise<{ enabled: boolean }> {
 
 export async function setLogEnabled(enabled: boolean): Promise<void> {
   await api.post('/logs/enabled', { enabled })
+}
+
+// ============ Sticky Load Balancing ============
+
+export async function getStickyStatus(): Promise<StickyStatusResponse> {
+  const { data } = await api.get<StickyStatusResponse>('/sticky/status')
+  return data
+}
+
+export async function getStickyStreams(): Promise<StickyStreamsResponse> {
+  const { data } = await api.get<StickyStreamsResponse>('/sticky/streams')
+  return data
+}
+
+export async function getStickyStats(): Promise<StickyStatsResponse> {
+  const { data } = await api.get<StickyStatsResponse>('/sticky/stats')
+  return data
 }

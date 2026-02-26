@@ -18,7 +18,7 @@ import {
 import { cn } from '@/lib/utils'
 import { extractErrorMessage } from '@/lib/utils'
 import { exportCredential } from '@/api/credentials'
-import type { CredentialStatusItem, BalanceResponse } from '@/types/api'
+import type { CredentialStatusItem, BalanceResponse, CredentialSnapshot } from '@/types/api'
 import {
   useSetDisabled,
   useSetPriority,
@@ -33,6 +33,8 @@ interface CredentialCardProps {
   onToggleSelect: () => void
   balance: BalanceResponse | null
   loadingBalance: boolean
+  stickyMode?: boolean
+  stickySnapshot?: CredentialSnapshot
 }
 
 function formatLastUsed(lastUsedAt: string | null): string {
@@ -77,10 +79,13 @@ export function CredentialCard({
   onToggleSelect,
   balance,
   loadingBalance,
+  stickyMode,
+  stickySnapshot,
 }: CredentialCardProps) {
   const [editingPriority, setEditingPriority] = useState(false)
   const [priorityValue, setPriorityValue] = useState(String(credential.priority))
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [showBoundKeys, setShowBoundKeys] = useState(false)
 
   const setDisabled = useSetDisabled()
   const setPriority = useSetPriority()
@@ -205,6 +210,45 @@ export function CredentialCard({
         </CardHeader>
 
         <CardContent className="mt-4 flex flex-1 flex-col gap-4">
+          {stickyMode && (
+            <div className="flex items-center gap-3 rounded-md border border-white/5 bg-white/[0.02] px-3 py-2">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans font-medium tracking-wide text-neutral-500">并发</span>
+                <span className={cn(
+                  'font-mono text-sm tabular-nums',
+                  (stickySnapshot?.activeCount ?? 0) > 0 ? 'text-emerald-400' : 'text-neutral-600'
+                )}>
+                  {stickySnapshot?.activeCount ?? 0}
+                </span>
+              </div>
+              <div className="h-3 w-px bg-white/10" />
+              <div className="relative flex items-center gap-1.5">
+                <span className="text-[11px] font-sans font-medium tracking-wide text-neutral-500">绑定</span>
+                <button
+                  type="button"
+                  className={cn(
+                    'font-mono text-sm tabular-nums',
+                    (stickySnapshot?.boundKeys?.length ?? 0) > 0
+                      ? 'text-white/90 hover:text-white cursor-pointer'
+                      : 'text-neutral-600'
+                  )}
+                  onClick={() => stickySnapshot?.boundKeys?.length && setShowBoundKeys(!showBoundKeys)}
+                  disabled={!stickySnapshot?.boundKeys?.length}
+                >
+                  {stickySnapshot?.boundKeys?.length ?? 0}
+                </button>
+                {showBoundKeys && stickySnapshot?.boundKeys && stickySnapshot.boundKeys.length > 0 && (
+                  <div className="absolute left-0 top-full z-10 mt-2 max-h-32 w-56 overflow-y-auto rounded-md border border-white/10 bg-black p-2 shadow-lg">
+                    {stickySnapshot.boundKeys.map((key, i) => (
+                      <div key={i} className="truncate font-mono text-[11px] text-neutral-400 py-0.5">
+                        {key.length > 20 ? key.slice(0, 8) + '...' + key.slice(-8) : key}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
               <div className="text-[11px] font-sans font-medium tracking-wide text-neutral-500">优先级</div>

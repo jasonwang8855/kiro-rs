@@ -17,7 +17,18 @@ use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
 use crate::kiro::token_manager::{CallContext, MultiTokenManager};
 use crate::model::config::TlsBackend;
+use crate::sticky::{AcquireResult, RequestIdentity, StickyTracker, StreamGuard};
 use parking_lot::Mutex;
+
+/// Sticky 模式错误类型
+pub enum StickyError {
+    /// 所有凭据已满载
+    AllFull { retry_after_secs: f64 },
+    /// 未配置 StickyTracker
+    NoTracker,
+    /// API 调用错误
+    ApiError(anyhow::Error),
+}
 
 /// 每个凭据的最大重试次数
 const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
@@ -38,6 +49,8 @@ pub struct KiroProvider {
     client_cache: Mutex<HashMap<Option<ProxyConfig>, Client>>,
     /// TLS 后端配置
     tls_backend: TlsBackend,
+    /// Sticky 负载均衡追踪器
+    sticky_tracker: Option<Arc<StickyTracker>>,
 }
 
 impl KiroProvider {
@@ -60,6 +73,7 @@ impl KiroProvider {
             global_proxy: proxy,
             client_cache: Mutex::new(cache),
             tls_backend,
+            sticky_tracker: None,
         }
     }
 
@@ -78,6 +92,17 @@ impl KiroProvider {
     /// 获取 token_manager 的引用
     pub fn token_manager(&self) -> &MultiTokenManager {
         &self.token_manager
+    }
+
+    /// 设置 sticky tracker
+    pub fn with_sticky_tracker(mut self, tracker: Arc<StickyTracker>) -> Self {
+        self.sticky_tracker = Some(tracker);
+        self
+    }
+
+    /// 获取 sticky tracker 引用
+    pub fn sticky_tracker(&self) -> Option<&Arc<StickyTracker>> {
+        self.sticky_tracker.as_ref()
     }
 
     /// 获取 API 基础 URL（使用 config 级 api_region）
@@ -249,6 +274,151 @@ impl KiroProvider {
         headers.insert("Connection", HeaderValue::from_static("close"));
 
         Ok(headers)
+    }
+
+    /// 发送 Sticky 模式的流式 API 请求
+    ///
+    /// 通过 StickyTracker 选择凭据，支持有限重试（最多 3 次）
+    /// 返回 StreamGuard 用于生命周期管理
+    pub async fn call_api_stream_sticky(
+        &self,
+        request_body: &str,
+        identity: &RequestIdentity,
+    ) -> Result<(reqwest::Response, StreamGuard), StickyError> {
+        let tracker = self
+            .sticky_tracker
+            .as_ref()
+            .ok_or(StickyError::NoTracker)?;
+
+        let model = Self::extract_model_from_request(request_body);
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..MAX_RETRIES_PER_CREDENTIAL {
+            let available = self
+                .token_manager
+                .available_credentials(model.as_deref());
+
+            let (credential_id, stream_id) = match tracker.try_acquire(identity, &available) {
+                AcquireResult::Acquired {
+                    credential_id,
+                    stream_id,
+                } => (credential_id, stream_id),
+                AcquireResult::AllFull { retry_after_secs } => {
+                    return Err(StickyError::AllFull { retry_after_secs });
+                }
+            };
+
+            let ctx = match self
+                .token_manager
+                .acquire_context_for(credential_id, model.as_deref())
+                .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracker.cancel_reservation(stream_id);
+                    // 报告凭据失败，避免重试时反复命中同一个坏凭据
+                    self.token_manager.report_failure(credential_id);
+                    last_error = Some(e);
+                    if attempt + 1 < MAX_RETRIES_PER_CREDENTIAL {
+                        sleep(Self::retry_delay(attempt)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let url = self.base_url_for(&ctx.credentials);
+            let headers = match self.build_headers(&ctx) {
+                Ok(h) => h,
+                Err(e) => {
+                    tracker.cancel_reservation(stream_id);
+                    self.token_manager.report_failure(ctx.id);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            let client = match self.client_for(&ctx.credentials) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracker.cancel_reservation(stream_id);
+                    self.token_manager.report_failure(ctx.id);
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+
+            let response = match client
+                .post(&url)
+                .headers(headers)
+                .body(request_body.to_string())
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracker.cancel_reservation(stream_id);
+                    tracing::warn!(
+                        "Sticky API 请求发送失败（尝试 {}/{}）: {}",
+                        attempt + 1,
+                        MAX_RETRIES_PER_CREDENTIAL,
+                        e
+                    );
+                    last_error = Some(e.into());
+                    if attempt + 1 < MAX_RETRIES_PER_CREDENTIAL {
+                        sleep(Self::retry_delay(attempt)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let status = response.status();
+
+            if status.is_success() {
+                self.token_manager.report_success(ctx.id);
+                let guard = StreamGuard::new(tracker.clone(), stream_id);
+                return Ok((response, guard));
+            }
+
+            // 失败：取消预留
+            tracker.cancel_reservation(stream_id);
+            let body = response.text().await.unwrap_or_default();
+
+            // 400 Bad Request — 请求本身有问题，重试无意义
+            if status.as_u16() == 400 {
+                return Err(StickyError::ApiError(anyhow::anyhow!(
+                    "Sticky API 请求失败: {} {}",
+                    status,
+                    body
+                )));
+            }
+
+            if status.as_u16() == 402 && Self::is_monthly_request_limit(&body) {
+                self.token_manager.report_quota_exhausted(ctx.id);
+            } else if matches!(status.as_u16(), 401 | 403) {
+                self.token_manager.report_failure(ctx.id);
+            }
+
+            tracing::warn!(
+                "Sticky API 请求失败（尝试 {}/{}）: {} {}",
+                attempt + 1,
+                MAX_RETRIES_PER_CREDENTIAL,
+                status,
+                body
+            );
+            last_error = Some(anyhow::anyhow!(
+                "Sticky API 请求失败: {} {}",
+                status,
+                body
+            ));
+
+            if attempt + 1 < MAX_RETRIES_PER_CREDENTIAL {
+                sleep(Self::retry_delay(attempt)).await;
+            }
+        }
+
+        Err(StickyError::ApiError(
+            last_error.unwrap_or_else(|| anyhow::anyhow!("Sticky API 请求失败：已达到最大重试次数")),
+        ))
     }
 
     /// 发送非流式 API 请求

@@ -234,3 +234,36 @@ pub async fn set_log_enabled(
 pub async fn get_log_enabled(State(state): State<AdminState>) -> impl IntoResponse {
     Json(serde_json::json!({ "enabled": state.service.is_log_enabled() }))
 }
+
+pub async fn get_sticky_status(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.get_sticky_status() {
+        Some(resp) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(super::types::AdminErrorResponse::not_found("Sticky tracker not configured")),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_sticky_streams(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.get_sticky_streams() {
+        Some(resp) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(super::types::AdminErrorResponse::not_found("Sticky tracker not configured")),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn get_sticky_stats(State(state): State<AdminState>) -> impl IntoResponse {
+    match state.service.get_sticky_stats() {
+        Some(resp) => Json(serde_json::to_value(resp).unwrap()).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(super::types::AdminErrorResponse::not_found("Sticky tracker not configured")),
+        )
+            .into_response(),
+    }
+}

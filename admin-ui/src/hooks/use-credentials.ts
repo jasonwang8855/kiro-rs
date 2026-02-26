@@ -15,8 +15,11 @@ import {
   deleteApiKey,
   getApiStats,
   getTotalBalance,
+  getStickyStatus,
+  getStickyStreams,
+  getStickyStats,
 } from '@/api/credentials'
-import type { AddCredentialRequest, CreateApiKeyRequest } from '@/types/api'
+import type { AddCredentialRequest, CreateApiKeyRequest, LoadBalancingMode } from '@/types/api'
 
 export function useCredentials() {
   return useQuery({
@@ -97,10 +100,37 @@ export function useLoadBalancingMode() {
 export function useSetLoadBalancingMode() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: setLoadBalancingMode,
+    mutationFn: (mode: LoadBalancingMode) => setLoadBalancingMode(mode),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['loadBalancingMode'] })
     },
+  })
+}
+
+export function useStickyStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ['stickyStatus'],
+    queryFn: getStickyStatus,
+    enabled,
+    refetchInterval: enabled ? 5000 : false,
+  })
+}
+
+export function useStickyStreams(enabled: boolean) {
+  return useQuery({
+    queryKey: ['stickyStreams'],
+    queryFn: getStickyStreams,
+    enabled,
+    refetchInterval: enabled ? 3000 : false,
+  })
+}
+
+export function useStickyStats(enabled: boolean) {
+  return useQuery({
+    queryKey: ['stickyStats'],
+    queryFn: getStickyStats,
+    enabled,
+    refetchInterval: enabled ? 5000 : false,
   })
 }
 

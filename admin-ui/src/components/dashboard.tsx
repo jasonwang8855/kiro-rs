@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useState } from 'react'
-import { LogOut, Plus, RefreshCw, Copy, ShieldCheck, Download, HeartPulse } from 'lucide-react'
+import { LogOut, Plus, RefreshCw, Copy, ShieldCheck, Download, HeartPulse, ChevronDown, ChevronRight } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { storage } from '@/lib/storage'
@@ -31,14 +31,34 @@ import {
   useDeleteApiKey,
   useSetApiKeyDisabled,
   useTotalBalance,
+  useLoadBalancingMode,
+  useSetLoadBalancingMode,
+  useStickyStatus,
+  useStickyStreams,
+  useStickyStats,
 } from '@/hooks/use-credentials'
 import { useScrambleText } from '@/hooks/use-scramble-text'
-import { extractErrorMessage, copyToClipboard } from '@/lib/utils'
+import { extractErrorMessage, copyToClipboard, cn } from '@/lib/utils'
 import { exportCredentials, getCredentialBalance } from '@/api/credentials'
-import type { BalanceResponse } from '@/types/api'
+import type { BalanceResponse, LoadBalancingMode, CredentialSnapshot } from '@/types/api'
 
 interface DashboardProps {
   onLogout: () => void
+}
+
+const MODE_LABELS: Record<LoadBalancingMode, string> = {
+  priority: '优先级',
+  balanced: '均衡',
+  sticky: '粘性',
+}
+
+function formatDuration(secs: number): string {
+  if (secs < 60) return `${secs}s`
+  const m = Math.floor(secs / 60)
+  const s = secs % 60
+  if (m < 60) return `${m}m${s > 0 ? `${s}s` : ''}`
+  const h = Math.floor(m / 60)
+  return `${h}h${m % 60}m`
 }
 
 export function Dashboard({ onLogout }: DashboardProps) {
@@ -52,12 +72,21 @@ export function Dashboard({ onLogout }: DashboardProps) {
   const [deleteKeyId, setDeleteKeyId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [batchValidating, setBatchValidating] = useState(false)
+  const [streamsExpanded, setStreamsExpanded] = useState(false)
 
   const queryClient = useQueryClient()
   const { data, isLoading, error, refetch } = useCredentials()
   const { data: apiKeysData } = useApiKeys()
   const { data: apiStatsData } = useApiStats()
   const { data: totalBalanceData } = useTotalBalance()
+  const { data: lbModeData, isLoading: lbModeLoading } = useLoadBalancingMode()
+  const setLbMode = useSetLoadBalancingMode()
+  const currentMode = lbModeData?.mode
+  const isSticky = currentMode === 'sticky'
+  const { data: stickyStatusData, isError: stickyStatusError } = useStickyStatus(isSticky)
+  const { data: stickyStreamsData } = useStickyStreams(isSticky && streamsExpanded)
+  const { data: stickyStatsData, isError: stickyStatsError } = useStickyStats(isSticky)
+  const stickyFetchError = stickyStatusError || stickyStatsError
   const { mutate: createApiKey, isPending: creatingApiKey } = useCreateApiKey()
   const { mutate: setApiKeyDisabled } = useSetApiKeyDisabled()
   const { mutate: deleteApiKey } = useDeleteApiKey()
@@ -179,6 +208,24 @@ export function Dashboard({ onLogout }: DashboardProps) {
     toast.success(`验活完成：${ok} 成功${fail > 0 ? `，${fail} 失败` : ''}`)
   }
 
+  const handleModeChange = (mode: LoadBalancingMode) => {
+    if (mode === currentMode) return
+    setLbMode.mutate(mode, {
+      onSuccess: () => toast.success(`负载均衡模式已切换为「${MODE_LABELS[mode]}」`),
+      onError: (err) => toast.error(`切换失败: ${extractErrorMessage(err)}`),
+    })
+  }
+
+  const stickySnapshotMap = useMemo(() => {
+    const map = new Map<number, CredentialSnapshot>()
+    if (stickyStatusData?.credentials) {
+      for (const c of stickyStatusData.credentials) {
+        map.set(c.id, c)
+      }
+    }
+    return map
+  }, [stickyStatusData])
+
 
 
   if (isLoading) {
@@ -217,6 +264,26 @@ export function Dashboard({ onLogout }: DashboardProps) {
             KIRO-RS // 控制中心
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center rounded-md border border-white/10 bg-white/[0.02] p-0.5">
+              {(['priority', 'balanced', 'sticky'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => handleModeChange(mode)}
+                  disabled={setLbMode.isPending || lbModeLoading}
+                  className={cn(
+                    'rounded-[5px] px-2.5 py-1 font-sans text-xs font-medium transition-colors',
+                    currentMode === mode
+                      ? 'bg-white/10 text-white'
+                      : 'text-neutral-500 hover:text-neutral-300',
+                    lbModeLoading && 'opacity-50'
+                  )}
+                >
+                  {MODE_LABELS[mode]}
+                </button>
+              ))}
+            </div>
+            <div className="h-5 w-px bg-white/10" />
             <Button onClick={() => setOauthDialogOpen(true)} size="sm" variant="secondary">
               <ShieldCheck className="mr-2 h-4 w-4" />
               OAuth 导入
@@ -289,6 +356,106 @@ export function Dashboard({ onLogout }: DashboardProps) {
           </CardContent>
         </Card>
 
+        {isSticky ? (
+          <section className="col-span-1 md:col-span-12 mt-2">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border border-white/10 bg-[#050505] px-4 py-2.5">
+              <span className="text-[11px] font-sans font-medium tracking-wide text-neutral-500">路由指标</span>
+              {stickyFetchError && (
+                <span className="text-[11px] font-sans text-yellow-500/80">数据可能过期</span>
+              )}
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">活跃流</span>
+                <span className="font-mono text-sm tabular-nums text-white">{stickyStatusData?.activeStreamCount ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">命中</span>
+                <span className="font-mono text-sm tabular-nums text-white">{stickyStatsData?.stats.hits ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">分配</span>
+                <span className="font-mono text-sm tabular-nums text-white">{stickyStatsData?.stats.assignments ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">解绑</span>
+                <span className="font-mono text-sm tabular-nums text-white">{stickyStatsData?.stats.unbinds ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">插队</span>
+                <span className="font-mono text-sm tabular-nums text-white">{stickyStatsData?.stats.queueJumps ?? 0}</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-sans text-neutral-500">429</span>
+                <span className={cn(
+                  'font-mono text-sm tabular-nums',
+                  (stickyStatsData?.stats.rejections429 ?? 0) > 0 ? 'text-red-400' : 'text-white'
+                )}>
+                  {stickyStatsData?.stats.rejections429 ?? 0}
+                </span>
+              </div>
+              <div className="ml-auto">
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-[11px] font-sans text-neutral-500 hover:text-neutral-300 transition-colors"
+                  onClick={() => setStreamsExpanded(!streamsExpanded)}
+                >
+                  {streamsExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                  活跃流详情
+                </button>
+              </div>
+            </div>
+            {streamsExpanded && (
+              <div className="mt-2 overflow-x-auto rounded-lg border border-white/10 bg-[#050505]">
+                <table className="w-full min-w-[700px] border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/10">
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">Stream ID</th>
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">凭据 ID</th>
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">API Key</th>
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">Session</th>
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">空闲时间</th>
+                      <th className="px-3 py-2 text-left font-sans text-[11px] font-medium tracking-wide text-neutral-500">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(!stickyStreamsData?.streams || stickyStreamsData.streams.length === 0) ? (
+                      <tr>
+                        <td colSpan={6} className="px-3 py-4 text-center font-sans text-xs text-neutral-500">暂无活跃流</td>
+                      </tr>
+                    ) : (
+                      stickyStreamsData.streams.map((s) => (
+                        <tr key={s.streamId} className="border-b border-white/5 font-mono text-xs text-white">
+                          <td className="px-3 py-2 tabular-nums text-neutral-400">{s.streamId}</td>
+                          <td className="px-3 py-2 tabular-nums">#{s.credentialId}</td>
+                          <td className="px-3 py-2 text-neutral-400">{s.apiKey.length > 16 ? s.apiKey.slice(0, 8) + '...' + s.apiKey.slice(-4) : s.apiKey}</td>
+                          <td className="px-3 py-2 text-neutral-400">{s.sessionId ? (s.sessionId.length > 16 ? s.sessionId.slice(0, 8) + '...' : s.sessionId) : '-'}</td>
+                          <td className="px-3 py-2 tabular-nums">{formatDuration(s.startedAtSecsAgo)}</td>
+                          <td className="px-3 py-2">
+                            <span className={cn(
+                              'inline-flex items-center gap-1.5 text-[11px]',
+                              s.activated ? 'text-emerald-400' : 'text-yellow-400'
+                            )}>
+                              <div className={cn('h-1.5 w-1.5 rounded-full', s.activated ? 'bg-emerald-400' : 'bg-yellow-400')} />
+                              {s.activated ? '活跃' : '预留'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ) : (
+          <section className="col-span-1 md:col-span-12 mt-2">
+            <div className="flex items-center gap-2 rounded-lg border border-white/5 bg-[#050505]/50 px-4 py-2">
+              <span className="text-[11px] font-sans text-neutral-600">
+                当前路由模式：{currentMode ? MODE_LABELS[currentMode] : '加载中...'}
+              </span>
+            </div>
+          </section>
+        )}
+
         <section className="col-span-1 md:col-span-12 mt-4">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 px-1">
             <h2 className="font-sans text-sm font-medium tracking-wide text-neutral-500">凭据列表</h2>
@@ -331,6 +498,8 @@ export function Dashboard({ onLogout }: DashboardProps) {
                     onToggleSelect={() => toggleSelect(credential.id)}
                     balance={balances[credential.id] ?? null}
                     loadingBalance={loadingBalances[credential.id] ?? false}
+                    stickyMode={isSticky}
+                    stickySnapshot={stickySnapshotMap.get(credential.id)}
                   />
                 ))}
               </div>

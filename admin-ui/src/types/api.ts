@@ -20,7 +20,10 @@ export interface CredentialStatusItem {
   lastUsedAt: string | null
   hasProxy: boolean
   proxyUrl?: string
+  activeStreams?: number
 }
+
+export type LoadBalancingMode = 'priority' | 'balanced' | 'sticky'
 
 export interface BalanceResponse {
   id: number
@@ -150,4 +153,42 @@ export interface RequestLogEntry {
 
 export interface RequestLogResponse {
   entries: RequestLogEntry[]
+}
+
+// ============ Sticky Load Balancing ============
+
+export interface CredentialSnapshot {
+  id: number
+  activeCount: number
+  boundKeys: string[]
+}
+
+export interface StreamSnapshot {
+  streamId: number
+  credentialId: number
+  apiKey: string
+  sessionId: string | null
+  activated: boolean
+  startedAtSecsAgo: number
+}
+
+export interface StickyStats {
+  hits: number
+  assignments: number
+  unbinds: number
+  queueJumps: number
+  rejections429: number
+}
+
+export interface StickyStatusResponse {
+  credentials: CredentialSnapshot[]
+  activeStreamCount: number
+}
+
+export interface StickyStreamsResponse {
+  streams: StreamSnapshot[]
+}
+
+export interface StickyStatsResponse {
+  stats: StickyStats
 }

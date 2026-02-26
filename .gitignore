@@ -11,3 +11,5 @@
 /admin-ui/tsconfig.tsbuildinfo
 /kiro_balance_cache.json
 /kiro_stats.json
+/.ccb/
+/plans/

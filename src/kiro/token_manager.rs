@@ -23,6 +23,7 @@ use crate::kiro::model::token_refresh::{
 };
 use crate::kiro::model::usage_limits::UsageLimitsResponse;
 use crate::model::config::Config;
+use crate::sticky::AvailableCredential;
 
 /// Token 管理器
 ///
@@ -649,6 +650,60 @@ impl MultiTokenManager {
     /// 获取可用凭据数量
     pub fn available_count(&self) -> usize {
         self.entries.lock().iter().filter(|e| !e.disabled).count()
+    }
+
+    pub fn available_credentials(&self, model: Option<&str>) -> Vec<AvailableCredential> {
+        let entries = self.entries.lock();
+        let is_opus = model
+            .map(|m| m.to_lowercase().contains("opus"))
+            .unwrap_or(false);
+
+        entries
+            .iter()
+            .filter(|entry| {
+                if entry.disabled {
+                    return false;
+                }
+                if is_opus && !entry.credentials.supports_opus() {
+                    return false;
+                }
+                true
+            })
+            .map(|entry| AvailableCredential {
+                id: entry.id,
+                supports_opus: entry.credentials.supports_opus(),
+            })
+            .collect()
+    }
+
+    pub async fn acquire_context_for(
+        &self,
+        credential_id: u64,
+        model: Option<&str>,
+    ) -> anyhow::Result<CallContext> {
+        let is_opus = model
+            .map(|m| m.to_lowercase().contains("opus"))
+            .unwrap_or(false);
+
+        let credentials = {
+            let entries = self.entries.lock();
+            let entry = entries
+                .iter()
+                .find(|entry| entry.id == credential_id)
+                .ok_or_else(|| anyhow::anyhow!("Credential #{} not found", credential_id))?;
+
+            if entry.disabled {
+                anyhow::bail!("Credential #{} is disabled", credential_id);
+            }
+
+            if is_opus && !entry.credentials.supports_opus() {
+                anyhow::bail!("Credential #{} does not support Opus model", credential_id);
+            }
+
+            entry.credentials.clone()
+        };
+
+        self.try_ensure_token(credential_id, &credentials).await
     }
 
     /// 根据负载均衡模式选择下一个凭据
@@ -1659,7 +1714,7 @@ impl MultiTokenManager {
     /// 设置负载均衡模式（Admin API）
     pub fn set_load_balancing_mode(&self, mode: String) -> anyhow::Result<()> {
         // 验证模式值
-        if mode != "priority" && mode != "balanced" {
+        if mode != "priority" && mode != "balanced" && mode != "sticky" {
             anyhow::bail!("无效的负载均衡模式: {}", mode);
         }
 
