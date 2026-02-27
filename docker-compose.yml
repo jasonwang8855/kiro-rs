@@ -9,4 +9,5 @@
     volumes:
       - ./config.json:/app/config/config.json
       - ./credentials.json:/app/config/credentials.json
+      - ./api_keys.db:/app/config/api_keys.db
     restart: unless-stopped
