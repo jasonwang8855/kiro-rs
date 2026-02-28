@@ -438,7 +438,7 @@ pub async fn post_messages(
                 );
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CONTENT_TYPE, "text/event-stream")
                     .header(header::CACHE_CONTROL, "no-cache")
                     .header(header::CONNECTION, "keep-alive")
                     .body(Body::from_stream(stream))
@@ -491,7 +491,7 @@ pub async fn post_messages(
 
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CONTENT_TYPE, "text/event-stream")
                     .header(header::CACHE_CONTROL, "no-cache")
                     .header(header::CONNECTION, "keep-alive")
                     .body(Body::from_stream(stream))
@@ -595,13 +595,13 @@ async fn handle_stream_request(
     // 生成初始事件（内部状态初始化，纯文本模式不发送）
     let initial_events = ctx.generate_initial_events();
 
-    // 创建纯文本流
+    // 创建 SSE 流
     let stream = create_sse_stream(response, ctx, initial_events, api_keys, key_id, request_log, model.to_string(), message_count, start, log_request_body);
 
-    // 返回纯文本响应
+    // 返回 SSE 流式响应
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
@@ -611,20 +611,11 @@ async fn handle_stream_request(
 /// Ping 事件间隔（25秒）
 const PING_INTERVAL_SECS: u64 = 25;
 
-/// 将 SSE 事件列表转换为纯文本字节流
-///
-/// 只提取 text_delta 和 thinking_delta 的文本内容，跳过其他事件。
-fn events_to_text_bytes(events: Vec<SseEvent>) -> Vec<Result<Bytes, Infallible>> {
+/// 将 SSE 事件列表转换为标准 SSE 字节流
+fn events_to_sse_bytes(events: Vec<SseEvent>) -> Vec<Result<Bytes, Infallible>> {
     events
         .into_iter()
-        .filter_map(|e| {
-            let text = e.to_text_string();
-            if text.is_empty() {
-                None
-            } else {
-                Some(Ok(Bytes::from(text)))
-            }
-        })
+        .map(|e| Ok(Bytes::from(e.to_sse_string())))
         .collect()
 }
 
@@ -674,8 +665,8 @@ fn create_sse_stream(
     start: Instant,
     log_request_body: String,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
-    // 初始事件只用于内部状态初始化，纯文本模式不发送
-    let initial_stream = stream::iter(events_to_text_bytes(initial_events));
+    // 初始事件
+    let initial_stream = stream::iter(events_to_sse_bytes(initial_events));
 
     let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
 
@@ -722,8 +713,8 @@ fn create_sse_stream(
                                 }
                             }
 
-                            // 转换为纯文本字节流
-                            let bytes = events_to_text_bytes(events);
+                            // 转换为 SSE 字节流
+                            let bytes = events_to_sse_bytes(events);
 
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx)))
                         }
@@ -736,7 +727,7 @@ fn create_sse_stream(
                                 log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                             }
                             let final_events = ctx.generate_final_events();
-                            let bytes = events_to_text_bytes(final_events);
+                            let bytes = events_to_sse_bytes(final_events);
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx)))
                         }
                         None => {
@@ -747,7 +738,7 @@ fn create_sse_stream(
                                 log_ctx.record(input, output, ctx.token_source(), "success");
                             }
                             let final_events = ctx.generate_final_events();
-                            let bytes = events_to_text_bytes(final_events);
+                            let bytes = events_to_sse_bytes(final_events);
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx)))
                         }
                     }
@@ -755,7 +746,7 @@ fn create_sse_stream(
                 // 发送 ping 保活（纯文本模式发送空格，不影响内容）
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
-                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b"event: ping\ndata: {\"type\": \"ping\"}\n\n"))];
                     Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx)))
                 }
             }
@@ -783,7 +774,7 @@ fn create_sse_stream_with_guard(
     // 激活流（上游已成功响应）
     guard.activate();
 
-    let initial_stream = stream::iter(events_to_text_bytes(initial_events));
+    let initial_stream = stream::iter(events_to_sse_bytes(initial_events));
     let log_ctx = StreamLogCtx { request_log, model, message_count, key_id: key_id.clone(), start, request_body: log_request_body, response_events: Vec::new() };
     let body_stream = response.bytes_stream();
 
@@ -820,7 +811,7 @@ fn create_sse_stream_with_guard(
                                     Err(e) => { tracing::warn!("解码事件失败: {}", e); }
                                 }
                             }
-                            let bytes = events_to_text_bytes(events);
+                            let bytes = events_to_sse_bytes(events);
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx, guard)))
                         }
                         Some(Err(e)) => {
@@ -831,7 +822,7 @@ fn create_sse_stream_with_guard(
                                 log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
                             }
                             let final_events = ctx.generate_final_events();
-                            let bytes = events_to_text_bytes(final_events);
+                            let bytes = events_to_sse_bytes(final_events);
                             // guard will be dropped here, deactivating the stream
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx, guard)))
                         }
@@ -842,14 +833,14 @@ fn create_sse_stream_with_guard(
                                 log_ctx.record(input, output, ctx.token_source(), "success");
                             }
                             let final_events = ctx.generate_final_events();
-                            let bytes = events_to_text_bytes(final_events);
+                            let bytes = events_to_sse_bytes(final_events);
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, true, log_ctx, guard)))
                         }
                     }
                 }
                 _ = ping_interval.tick() => {
                     tracing::trace!("发送 ping 保活事件");
-                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                    let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b"event: ping\ndata: {\"type\": \"ping\"}\n\n"))];
                     Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, usage_recorded, log_ctx, guard)))
                 }
             }
@@ -1115,12 +1106,8 @@ async fn handle_non_stream_response(
         });
     }
 
-    // 返回纯文本响应
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from(text_content))
-        .unwrap()
+    // 返回 Anthropic 标准 JSON 响应
+    Json(response_body).into_response()
 }
 
 /// 检测模型名是否包含 "thinking" 后缀，若包含则覆写 thinking 配置
@@ -1358,7 +1345,7 @@ pub async fn post_messages_cc(
 
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CONTENT_TYPE, "text/event-stream")
                     .header(header::CACHE_CONTROL, "no-cache")
                     .header(header::CONNECTION, "keep-alive")
                     .body(Body::from_stream(stream))
@@ -1407,7 +1394,7 @@ pub async fn post_messages_cc(
 
                 Response::builder()
                     .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                    .header(header::CONTENT_TYPE, "text/event-stream")
                     .header(header::CACHE_CONTROL, "no-cache")
                     .header(header::CONNECTION, "keep-alive")
                     .body(Body::from_stream(stream))
@@ -1513,13 +1500,13 @@ async fn handle_stream_request_buffered(
     // 创建缓冲流处理上下文
     let ctx = BufferedStreamContext::new(model, estimated_input_tokens, thinking_enabled);
 
-    // 创建缓冲纯文本流
+    // 创建缓冲 SSE 流
     let stream = create_buffered_sse_stream(response, ctx, api_keys, key_id, request_log, model.to_string(), message_count, start, log_request_body);
 
-    // 返回纯文本响应
+    // 返回 SSE 流式响应
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header(header::CONNECTION, "keep-alive")
         .body(Body::from_stream(stream))
@@ -1572,7 +1559,7 @@ fn create_buffered_sse_stream(
                     // 优先检查 ping 保活（等待期间发送空格保活）
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
-                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b"event: ping\ndata: {\"type\": \"ping\"}\n\n"))];
                         return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, log_ctx)));
                     }
 
@@ -1612,7 +1599,7 @@ fn create_buffered_sse_stream(
                                     }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
-                                let bytes = events_to_text_bytes(all_events);
+                                let bytes = events_to_sse_bytes(all_events);
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx)));
                             }
                             None => {
@@ -1627,7 +1614,7 @@ fn create_buffered_sse_stream(
                                     }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), "success");
-                                let bytes = events_to_text_bytes(all_events);
+                                let bytes = events_to_sse_bytes(all_events);
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx)));
                             }
                         }
@@ -1680,7 +1667,7 @@ fn create_buffered_sse_stream_with_guard(
 
                     _ = ping_interval.tick() => {
                         tracing::trace!("发送 ping 保活事件（缓冲模式）");
-                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b" "))];
+                        let bytes: Vec<Result<Bytes, Infallible>> = vec![Ok(Bytes::from_static(b"event: ping\ndata: {\"type\": \"ping\"}\n\n"))];
                         return Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval, api_keys, key_id, log_ctx, guard)));
                     }
 
@@ -1714,7 +1701,7 @@ fn create_buffered_sse_stream_with_guard(
                                     }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), &format!("error: {}", e));
-                                let bytes = events_to_text_bytes(all_events);
+                                let bytes = events_to_sse_bytes(all_events);
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx, guard)));
                             }
                             None => {
@@ -1728,7 +1715,7 @@ fn create_buffered_sse_stream_with_guard(
                                     }));
                                 }
                                 log_ctx.record(input, output, ctx.token_source(), "success");
-                                let bytes = events_to_text_bytes(all_events);
+                                let bytes = events_to_sse_bytes(all_events);
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval, api_keys, key_id, log_ctx, guard)));
                             }
                         }
