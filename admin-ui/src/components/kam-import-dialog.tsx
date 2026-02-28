@@ -232,6 +232,7 @@ export function KamImportDialog({ open, onOpenChange }: KamImportDialogProps) {
             refreshToken: token,
             authMethod,
             authRegion: cred.region?.trim() || undefined,
+            apiRegion: cred.region?.trim() || undefined,
             clientId,
             clientSecret,
             machineId: account.machineId?.trim() || undefined,

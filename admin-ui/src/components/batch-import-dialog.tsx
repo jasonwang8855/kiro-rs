@@ -183,7 +183,7 @@ export function BatchImportDialog({ open, onOpenChange }: BatchImportDialogProps
             refreshToken: token,
             authMethod,
             authRegion: cred.authRegion?.trim() || cred.region?.trim() || undefined,
-            apiRegion: cred.apiRegion?.trim() || undefined,
+            apiRegion: cred.apiRegion?.trim() || cred.region?.trim() || undefined,
             clientId,
             clientSecret,
             priority: cred.priority || 0,

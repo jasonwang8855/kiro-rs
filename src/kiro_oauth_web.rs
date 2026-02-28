@@ -69,6 +69,9 @@ pub struct StatusQuery {
 #[serde(rename_all = "camelCase")]
 pub struct ImportTokenRequest {
     refresh_token: String,
+    region: Option<String>,
+    auth_region: Option<String>,
+    api_region: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -354,7 +357,7 @@ async fn check_status(
                         priority: 0,
                         region: Some(next.region.clone()),
                         auth_region: Some(next.region.clone()),
-                        api_region: None,
+                        api_region: Some(next.region.clone()),
                         machine_id: None,
                         email: None,
                         proxy_url: None,
@@ -410,7 +413,14 @@ async fn import_token(
     State(state): State<KiroOAuthWebState>,
     Json(payload): Json<ImportTokenRequest>,
 ) -> impl IntoResponse {
-    let refresh_token = payload.refresh_token.trim();
+    let ImportTokenRequest {
+        refresh_token,
+        region,
+        auth_region,
+        api_region,
+    } = payload;
+
+    let refresh_token = refresh_token.trim();
     if refresh_token.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -423,15 +433,30 @@ async fn import_token(
             .into_response();
     }
 
+    let normalize_region = |value: Option<String>| {
+        value.and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+    };
+
+    let region = normalize_region(region);
+    let auth_region = normalize_region(auth_region).or_else(|| region.clone());
+    let api_region = normalize_region(api_region).or_else(|| region.clone());
+
     let req = AddCredentialRequest {
         refresh_token: refresh_token.to_string(),
         auth_method: "social".to_string(),
         client_id: None,
         client_secret: None,
         priority: 0,
-        region: None,
-        auth_region: None,
-        api_region: None,
+        region,
+        auth_region,
+        api_region,
         machine_id: None,
         email: None,
         proxy_url: None,
@@ -863,6 +888,8 @@ const SELECT_HTML: &str = r##"<!doctype html>
         <form id="importForm">
           <label>refreshToken</label>
           <textarea id="refreshToken" rows="4" placeholder="粘贴 refreshToken"></textarea>
+          <label>Region（可选，示例：eu-central-1）</label>
+          <input id="importRegion" placeholder="留空则使用全局配置" />
           <button class="btn" type="submit">导入并强制刷新验证</button>
         </form>
         <div id="result"></div>
@@ -877,12 +904,17 @@ const SELECT_HTML: &str = r##"<!doctype html>
     document.getElementById("importForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const token = document.getElementById("refreshToken").value.trim();
+      const region = document.getElementById("importRegion").value.trim();
       const out = document.getElementById("result");
       out.innerHTML = "";
+      const payload = { refreshToken: token };
+      if (region) {
+        payload.region = region;
+      }
       const resp = await fetch("/v0/oauth/kiro/import", {
         method: "POST",
         headers: {"Content-Type":"application/json"},
-        body: JSON.stringify({refreshToken: token})
+        body: JSON.stringify(payload)
       });
       const data = await resp.json();
       out.className = "status";
