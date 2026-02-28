@@ -174,6 +174,16 @@ impl ApiKeyManager {
         );
     }
 
+    pub fn get_name_by_id(&self, key_id: &str) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT name FROM api_keys WHERE id = ?1",
+            params![key_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
     pub fn list(&self) -> Vec<ApiKeyPublicInfo> {
         let conn = self.conn.lock();
         let mut stmt = conn
